@@ -118,6 +118,9 @@ pub enum Error {
     #[error("Cannot open kernel file: {0}")]
     KernelFile(#[source] io::Error),
 
+    #[error("Cannot open the device tree file: {0}")]
+    DtbFile(io::Error),
+
     #[error("Cannot open initramfs file: {0}")]
     InitramfsFile(#[source] io::Error),
 
@@ -1311,6 +1314,16 @@ impl Vm {
                 ))
             })?;
 
+        let dtb_path = self
+            .config
+            .lock()
+            .unwrap()
+            .dtb
+            .as_ref()
+            .map(|k| File::open(&k.path))
+            .transpose()
+            .map_err(Error::DtbFile)?;
+
         arch::configure_system(
             &mem,
             cmdline.as_str(),
@@ -1323,6 +1336,7 @@ impl Vm {
             &vgic,
             &self.numa_nodes,
             pmu_supported,
+            dtb_path,
         )
         .map_err(Error::ConfigureSystem)?;
 
