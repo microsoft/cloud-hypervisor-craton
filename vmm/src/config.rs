@@ -368,6 +368,7 @@ pub struct VmParams<'a> {
     #[cfg(feature = "gdb")]
     pub gdb: bool,
     pub platform: Option<&'a str>,
+    pub dtb: Option<&'a str>,
 }
 
 impl<'a> VmParams<'a> {
@@ -399,8 +400,11 @@ impl<'a> VmParams<'a> {
         let platform = args.value_of("platform");
         #[cfg(feature = "tdx")]
         let tdx = args.value_of("tdx");
+
         #[cfg(feature = "gdb")]
         let gdb = args.is_present("gdb");
+        let dtb = args.value_of("dtb");
+
         VmParams {
             cpus,
             memory,
@@ -430,6 +434,7 @@ impl<'a> VmParams<'a> {
             #[cfg(feature = "gdb")]
             gdb,
             platform,
+            dtb,
         }
     }
 }
@@ -2262,6 +2267,11 @@ pub struct PayloadConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DtbConfig {
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct VmConfig {
     #[serde(default)]
     pub cpus: CpusConfig,
@@ -2301,6 +2311,7 @@ pub struct VmConfig {
     #[cfg(feature = "gdb")]
     pub gdb: bool,
     pub platform: Option<PlatformConfig>,
+    pub dtb: Option<DtbConfig>,
 }
 
 impl VmConfig {
@@ -2692,6 +2703,12 @@ impl VmConfig {
         #[cfg(feature = "gdb")]
         let gdb = vm_params.gdb;
 
+        let mut dtb: Option<DtbConfig> = None;
+        if let Some(k) = vm_params.dtb {
+            dtb = Some(DtbConfig {
+                path: PathBuf::from(k),
+            });
+        }
         let mut config = VmConfig {
             cpus: CpusConfig::parse(vm_params.cpus)?,
             memory: MemoryConfig::parse(vm_params.memory, vm_params.memory_zones)?,
@@ -2721,6 +2738,7 @@ impl VmConfig {
             #[cfg(feature = "gdb")]
             gdb,
             platform,
+            dtb,
         };
         config.validate().map_err(Error::Validation)?;
         Ok(config)
@@ -3328,6 +3346,7 @@ mod tests {
             #[cfg(feature = "gdb")]
             gdb: false,
             platform: None,
+            dtb: None,
         };
 
         assert!(valid_config.validate().is_ok());

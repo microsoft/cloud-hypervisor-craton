@@ -2067,6 +2067,7 @@ mod unit_tests {
             #[cfg(feature = "gdb")]
             gdb: false,
             platform: None,
+            dtb: None,
         }))
     }
 
