@@ -409,6 +409,14 @@ fn create_app<'a>(
             .group("vm-config"),
     );
 
+    let app = app.arg(
+        Arg::with_name("dtb")
+            .long("dtb")
+            .help("Path to device tree file.")
+            .takes_value(true)
+            .group("vm-config"),
+    );
+
     app
 }
 
@@ -742,6 +750,7 @@ mod unit_tests {
             #[cfg(feature = "gdb")]
             gdb: false,
             platform: None,
+            dtb: None,
         };
 
         assert_eq!(expected_vm_config, result_vm_config);

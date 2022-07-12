@@ -13,6 +13,9 @@ use std::cmp;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
+use std::fs::File;
+use std::io;
+use std::io::Read;
 use std::result;
 use std::str;
 use std::sync::{Arc, Mutex};
@@ -137,6 +140,14 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     let fdt_final = fdt.finish()?;
 
     Ok(fdt_final)
+}
+
+pub fn fdt_file_to_vec(file: &mut File) -> io::Result<Vec<u8>> {
+    let metadata = file.metadata()?;
+    let mut buffer = vec![0; metadata.len() as usize];
+    file.read_exact(&mut buffer)?;
+
+    Ok(buffer)
 }
 
 pub fn write_fdt_to_memory(fdt_final: Vec<u8>, guest_mem: &GuestMemoryMmap) -> Result<()> {
