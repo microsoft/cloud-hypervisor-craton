@@ -12,6 +12,11 @@ use std::cmp;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
+use std::fs;
+use std::fs::{File, OpenOptions, Metadata};
+use std::io::Read;
+use std::io;
+use std::path::PathBuf;
 use std::result;
 use std::str;
 
@@ -25,6 +30,7 @@ use super::layout::{
     PCI_HIGH_BASE, PCI_MMCONFIG_SIZE, PCI_MMCONFIG_START,
 };
 use vm_fdt::{FdtWriter, FdtWriterResult};
+use device_tree::DeviceTree;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryRegion};
 
 // This is a value for uniquely identifying the FDT node declaring the interrupt controller.
@@ -137,6 +143,14 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     Ok(fdt_final)
 }
 
+pub fn fdt_file_to_vec(file: &mut File) -> io::Result<Vec<u8>> {
+
+    let metadata = file.metadata()?;
+    let mut buffer = vec![0; metadata.len() as usize];
+    file.read_to_end(&mut buffer).expect("buffer overflow");
+
+    Ok(buffer)
+}
 pub fn write_fdt_to_memory(fdt_final: Vec<u8>, guest_mem: &GuestMemoryMmap) -> Result<()> {
     // Write FDT to memory.
     let fdt_address = GuestAddress(get_fdt_addr());
