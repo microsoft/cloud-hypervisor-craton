@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::File;
-use std::path::PathBuf;
 use std::sync::Arc;
 use vm_memory::{
     Address, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, GuestUsize,

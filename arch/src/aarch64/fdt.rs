@@ -12,11 +12,9 @@ use std::cmp;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
-use std::fs;
-use std::fs::{File, OpenOptions, Metadata};
+use std::fs::File;
 use std::io::Read;
 use std::io;
-use std::path::PathBuf;
 use std::result;
 use std::str;
 

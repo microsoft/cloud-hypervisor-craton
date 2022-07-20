@@ -997,8 +997,6 @@ impl Vm {
         )
         .map_err(Error::MemoryManager)?;
 
-        println!("created MemoryManager");
-
         /* Nuno: rest of this code is from new_from_memory_manager */
 
         /* Nuno: no iommu please */
@@ -1020,8 +1018,6 @@ impl Vm {
             false,
         )
         .map_err(Error::DeviceManager)?;
-
-        println!("created DeviceManager");
 
         let memory = memory_manager.lock().unwrap().guest_memory();
         let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
@@ -1047,8 +1043,6 @@ impl Vm {
             &numa_nodes,
         )
         .map_err(Error::CpuManager)?;
-
-        println!("created CpuManager");
 
         let on_tty = unsafe { libc::isatty(libc::STDIN_FILENO as i32) } != 0;
         let kernel = config

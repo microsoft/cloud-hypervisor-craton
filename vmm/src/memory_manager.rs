@@ -181,6 +181,9 @@ pub struct MemoryManager {
 
 #[derive(Debug)]
 pub enum Error {
+    /// Failed to mmap craton memory
+    CratonMmap(io::Error),
+
     /// Failed to create shared file.
     SharedFileCreate(io::Error),
 
@@ -1098,11 +1101,8 @@ impl MemoryManager {
          * the device may be smaller than the mmap region size, so we do the mmap here)
          */
         let ram_file = OpenOptions::new().read(true).write(true).open(ram_path).unwrap();
-        println!("opened ram file");
         let prot = libc::PROT_READ | libc::PROT_WRITE;
         let flags = libc::MAP_SHARED;
-        println!("libc::MAP_SHARED = {:?}", flags);
-        println!("libc::PROT_READ | libc::PROT_WRITE = {:?}", prot);
         use core::ptr::null_mut;
         let mmap_addr = unsafe {
             libc::mmap(
@@ -1116,10 +1116,8 @@ impl MemoryManager {
         };
 
         if mmap_addr == libc::MAP_FAILED {
-            eprintln!("mmap failed!");
-            return Err(Error::SharedFileCreate(io::Error::last_os_error()));
+            return Err(Error::CratonMmap(io::Error::last_os_error()));
         }
-        println!("mmap succeeded! {:?}", mmap_addr);
         /* Nuno: test access to region */
         unsafe {
             //*(mmap_addr as *mut u8) = 69;
@@ -1137,10 +1135,6 @@ impl MemoryManager {
             )
         }.unwrap();
         let region = Arc::new(GuestRegionMmap::new(region, ram_start).unwrap());
-        println!("created GuestRegionMmap");
-        println!(" pointer: {:#x}", region.as_ptr() as u64);
-        println!(" guest addr: {:#x}", region.start_addr().raw_value());
-        println!(" size: {:#x}", region.len() as u64);
 
         if let Some(memory_zone) = memory_zones.get_mut(&zone_id) {
             memory_zone.regions.push(region.clone());
@@ -1158,10 +1152,6 @@ impl MemoryManager {
         let start_of_device_area =
             MemoryManager::start_addr(guest_memory.last_addr(), false)?;
         let end_of_ram_area = start_of_device_area.unchecked_sub(1);
-
-        /* Nuno: copy what new() does here; I guess this isn't used if hotplug is disabled */
-        let mut hotplug_slots = Vec::with_capacity(HOTPLUG_COUNT);
-        hotplug_slots.resize_with(HOTPLUG_COUNT, HotPlugState::default);
 
         /* Nuno:
          * This just cuts 64k off from the total address space size, for reasons
@@ -1198,7 +1188,6 @@ impl MemoryManager {
 
         /* Nuno:  */
         let ram_allocator = AddressAllocator::new(ram_start, ram_start.0 + ram_size as u64).unwrap();
-        println!("created AddressAllocator");
 
         /* Nuno: this needs to be atomic now */
         let guest_memory = GuestMemoryAtomic::new(guest_memory);
@@ -1250,9 +1239,7 @@ impl MemoryManager {
          * Nuno: this maps regions into kvm guest with ioctls, and calls the allocator to occupy
          * those regions so they can't be reused - I think we keep it as is
          */
-        println!("Allocating address space");
         memory_manager.allocate_address_space()?;
-        println!("Allocated address space");
 
         Ok(Arc::new(Mutex::new(memory_manager)))
     }

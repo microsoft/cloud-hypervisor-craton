@@ -1726,7 +1726,7 @@ impl DeviceManager {
     #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
     fn add_craton_uio_devices(
         &mut self,
-        interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
+        _interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
         uio_devices_info: Vec<uio::UioDeviceInfo>,
     ) -> DeviceManagerResult<()> {
         for uio_dev_info in uio_devices_info.iter() {

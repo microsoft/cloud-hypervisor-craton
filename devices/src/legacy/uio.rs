@@ -5,10 +5,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::sync::{Arc, Barrier};
-use std::{io, result};
+use std::result;
 use std::path::{Path, PathBuf};
-//use std::string::*;
-use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
 
 #[derive(Debug)]
@@ -124,9 +122,9 @@ impl Uio {
 }
 
 impl BusDevice for Uio {
-    fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+    fn read(&mut self, _base: u64, _offset: u64, _data: &mut [u8]) {
     }
-    fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+    fn write(&mut self, _base: u64, _offset: u64, _data: &[u8]) -> Option<Arc<Barrier>> {
         None
     }
 }
