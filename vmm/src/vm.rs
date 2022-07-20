@@ -1104,13 +1104,25 @@ impl Vm {
             exit_evt,
         };
 
+        // TODO get these from device tree
+        // tuple of (address, irq)
+        let virtio_mmio_slots: Vec<(u64, u32)> = vec![
+            (0x4100_0000, 0x64),
+            (0x4100_0200, 0x65),
+            (0x4100_0400, 0x66),
+            (0x4100_0600, 0x67),
+            (0x4100_0800, 0x68),
+            (0x4100_0a00, 0x69),
+            (0x4100_0c00, 0x6a),
+            (0x4100_0e00, 0x6b),
+        ];
         // The device manager must create the devices from here as it is part
         // of the regular code path creating everything from scratch.
         new_vm
             .device_manager
             .lock()
             .unwrap()
-            .create_devices_craton(serial_pty, console_pty, console_resize_pipe, uio_devices_info)
+            .create_devices_craton(serial_pty, console_pty, console_resize_pipe, uio_devices_info, virtio_mmio_slots)
             .map_err(Error::DeviceManager)?;
 
         Ok(new_vm)

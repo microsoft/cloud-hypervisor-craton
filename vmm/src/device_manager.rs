@@ -433,6 +433,9 @@ pub enum DeviceManagerError {
     /// Missing PCI b/d/f from the DeviceNode.
     MissingDeviceNodePciBdf,
 
+    /// Not enough virtio slots to satisfy the devices
+    VirtioMmioSlotsNotEnough,
+
     /// No support for device passthrough
     NoDevicePassthroughSupport,
 
@@ -1234,13 +1237,14 @@ impl DeviceManager {
         Ok(())
     }
 
-    #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
+    #[cfg(all(feature = "kvm", target_arch = "aarch64", feature = "mmio_support"))]
     pub fn create_devices_craton(
         &mut self,
         serial_pty: Option<PtyPair>,
         console_pty: Option<PtyPair>,
         console_resize_pipe: Option<File>,
         uio_devices_info: Vec<uio::UioDeviceInfo>,
+        virtio_mmio_slots: Vec<(u64, u32)>, // tuple of (address, irq)
     ) -> DeviceManagerResult<()> {
         let mut virtio_devices: Vec<(VirtioDeviceArc, bool, String, u16)> = Vec::new();
 
@@ -1266,11 +1270,31 @@ impl DeviceManager {
 
         virtio_devices.append(&mut self.make_virtio_devices()?);
 
-        if cfg!(feature = "pci_support") {
-            self.add_pci_devices(virtio_devices.clone())?;
-        } else if cfg!(feature = "mmio_support") {
-            self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
+        /* Nuno:
+         * Add the virtio devices to self.device_tree - which is used for restore
+         * (Note this is not the device tree that will go into the guest)
+         * Later, when add_virtio_mmio_device checks if there is an existing
+         * mmio register + irq, it will use that instead of allocating new ones
+         * NOTE: this approach is quite hacky - for instance it doesn't check if the
+         * irq is already in use...
+         */
+        if virtio_devices.len() > virtio_mmio_slots.len() {
+            return Err(DeviceManagerError::VirtioMmioSlotsNotEnough);
         }
+        for ((_, _, id, _), (mmio_base, irq_num)) in virtio_devices.iter().zip(virtio_mmio_slots.iter()) {
+            /* Nuno: copied code from add_virtio_mmio_device */
+            let id = format!("{}-{}", VIRTIO_MMIO_DEVICE_NAME_PREFIX, id);
+            let mut node = device_node!(id);
+            node.children = vec![id.clone()];
+            node.resources.push(Resource::MmioAddressRange {
+                base: *mmio_base,
+                size: 0x200,
+            });
+            node.resources.push(Resource::LegacyIrq(*irq_num));
+            self.device_tree.lock().unwrap().insert(id, node);
+        }
+
+        self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
 
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
