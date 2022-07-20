@@ -2361,7 +2361,7 @@ impl VmConfig {
                 path: PathBuf::from(k),
             });
         }
-
+        
         #[cfg(feature = "tdx")]
         let tdx = vm_params.tdx.map(TdxConfig::parse).transpose()?;
         let mut dtb: Option<DtbConfig> = None;
@@ -2370,8 +2370,19 @@ impl VmConfig {
                 path: PathBuf::from(k),
             });
         }
+
+        let cpus = if let Some(_dtb) = &dtb {
+
+            let mut conf = CpusConfig::default();
+            conf.boot_vcpus = arch::num_cpus(&_dtb.path).unwrap();
+            conf.max_vcpus = conf.boot_vcpus;
+            conf
+        }
+        else {
+            CpusConfig::parse(vm_params.cpus)?
+        };
         let config = VmConfig {
-            cpus: CpusConfig::parse(vm_params.cpus)?,
+            cpus: cpus,
             memory: MemoryConfig::parse(vm_params.memory, vm_params.memory_zones)?,
             kernel,
             initramfs,
