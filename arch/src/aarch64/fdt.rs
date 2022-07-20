@@ -14,7 +14,7 @@ use std::ffi::CStr;
 use std::fmt::Debug;
 use std::fs;
 use std::fs::{File, OpenOptions, Metadata};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::io;
 use std::path::PathBuf;
 use std::result;
@@ -159,6 +159,19 @@ pub fn write_fdt_to_memory(fdt_final: Vec<u8>, guest_mem: &GuestMemoryMmap) -> R
     Ok(())
 }
 
+pub fn num_cpus(dtb_path: &PathBuf) -> io::Result<u8> {
+
+    let mut file = File::open(dtb_path)?;
+    let pos = file.seek(SeekFrom::Current(0)).unwrap();
+    let metadata = file.metadata().unwrap();
+    let mut buffer = vec![0; metadata.len() as usize];
+    file.read_exact(&mut buffer).unwrap();
+    file.seek(SeekFrom::Start(pos)).unwrap();
+    let fdt = fdt_parser::Fdt::new(&buffer).unwrap();
+    let cpus_node = fdt.find_node("/cpus").unwrap();
+
+    Ok(cpus_node.children().count() as u8)
+}
 // Following are the auxiliary function for creating the different nodes that we append to our FDT.
 fn create_cpu_nodes(
     fdt: &mut FdtWriter,
