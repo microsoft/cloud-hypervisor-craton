@@ -25,7 +25,6 @@ pub struct DeviceNode {
     #[serde(skip)]
     #[cfg(feature = "mmio_support")]
     pub mmio_device_handle: Option<Arc<Mutex<virtio_devices::transport::VirtioMmioDevice>>>,
-
 }
 
 impl DeviceNode {

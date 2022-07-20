@@ -1075,7 +1075,6 @@ impl MemoryManager {
         ram_path: &PathBuf,
         phys_bits: u8,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
-
         /* Nuno: just 1 ram region based on the uio device passed in */
         let arch_mem_regions = vec![(ram_start, ram_size, RegionType::Ram)];
         let arch_mem_regions: Vec<ArchMemRegion> = arch_mem_regions
@@ -1097,7 +1096,11 @@ impl MemoryManager {
          * (The vm-memory crate doesn't support mmaping a device, because the file size of
          * the device may be smaller than the mmap region size, so we do the mmap here)
          */
-        let ram_file = OpenOptions::new().read(true).write(true).open(ram_path).unwrap();
+        let ram_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(ram_path)
+            .unwrap();
         println!("opened ram file");
         let prot = libc::PROT_READ | libc::PROT_WRITE;
         let flags = libc::MAP_SHARED;
@@ -1112,7 +1115,7 @@ impl MemoryManager {
                 flags,
                 ram_file.as_raw_fd(), /* Note: after mapping we can safely close the file */
                 ram_offset as libc::off_t,
-                )
+            )
         };
 
         if mmap_addr == libc::MAP_FAILED {
@@ -1123,19 +1126,13 @@ impl MemoryManager {
         /* Nuno: test access to region */
         unsafe {
             //*(mmap_addr as *mut u8) = 69;
-            let vec: Vec<u8> = vec!(1,2,3);
+            let vec: Vec<u8> = vec![1, 2, 3];
             std::ptr::copy_nonoverlapping(vec.as_ptr(), mmap_addr as *mut u8, 3);
         };
 
         // Safe because we just mmapped this region successfully
-        let region = unsafe {
-            MmapRegion::build_raw(
-                mmap_addr as *mut u8,
-                ram_size,
-                prot,
-                flags
-            )
-        }.unwrap();
+        let region =
+            unsafe { MmapRegion::build_raw(mmap_addr as *mut u8, ram_size, prot, flags) }.unwrap();
         let region = Arc::new(GuestRegionMmap::new(region, ram_start).unwrap());
         println!("created GuestRegionMmap");
         println!(" pointer: {:#x}", region.as_ptr() as u64);
@@ -1155,8 +1152,7 @@ impl MemoryManager {
         /* Nuno:
          * Get the first address after ram as the device area
          */
-        let start_of_device_area =
-            MemoryManager::start_addr(guest_memory.last_addr(), false)?;
+        let start_of_device_area = MemoryManager::start_addr(guest_memory.last_addr(), false)?;
         let end_of_ram_area = start_of_device_area.unchecked_sub(1);
 
         /* Nuno: copy what new() does here; I guess this isn't used if hotplug is disabled */
@@ -1197,7 +1193,8 @@ impl MemoryManager {
         ));
 
         /* Nuno:  */
-        let ram_allocator = AddressAllocator::new(ram_start, ram_start.0 + ram_size as u64).unwrap();
+        let ram_allocator =
+            AddressAllocator::new(ram_start, ram_start.0 + ram_size as u64).unwrap();
         println!("created AddressAllocator");
 
         /* Nuno: this needs to be atomic now */

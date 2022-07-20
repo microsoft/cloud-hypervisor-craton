@@ -51,11 +51,11 @@ use block_util::{
     fixed_vhd_async::FixedVhdDiskAsync, fixed_vhd_sync::FixedVhdDiskSync, qcow_sync::QcowDiskSync,
     raw_async::RawFileDisk, raw_sync::RawFileDiskSync, vhdx_sync::VhdxDiskSync, ImageType,
 };
-use devices::legacy::uio;
 #[cfg(target_arch = "aarch64")]
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
+use devices::legacy::uio;
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::Pl011;
 #[cfg(target_arch = "x86_64")]
@@ -1708,17 +1708,19 @@ impl DeviceManager {
         Ok(())
     }
     #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
-    pub fn enable_craton_uio_devices(
-        &mut self
-    ) -> DeviceManagerResult<()> {
+    pub fn enable_craton_uio_devices(&mut self) -> DeviceManagerResult<()> {
         /* connect eventfd and resample fd to kvm */
         for (eventfd, resamplefd, irq) in self.craton_uio_devices.iter() {
-            self.address_manager.vm.register_irqfd_with_resample(eventfd, resamplefd, *irq).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed registering irq_fd: {}", e),
-                )
-            }).unwrap();
+            self.address_manager
+                .vm
+                .register_irqfd_with_resample(eventfd, resamplefd, *irq)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed registering irq_fd: {}", e),
+                    )
+                })
+                .unwrap();
         }
         Ok(())
     }
@@ -1738,7 +1740,11 @@ impl DeviceManager {
             assert!(uio_dev_info.name.eq("rtc0"));
 
             /* open the device file for mapping and interrupt fds */
-            let dev_file = OpenOptions::new().read(true).write(true).open(&uio_dev_info.dev_path).unwrap();
+            let dev_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&uio_dev_info.dev_path)
+                .unwrap();
             info!("opened {}", uio_dev_info.name);
 
             /* interrupts */
@@ -1751,7 +1757,7 @@ impl DeviceManager {
             info!("Created eventfd and resamplefd");
 
             /* register eventfd and resample fd with uio driver */
-            use vmm_sys_util::ioctl::{ioctl_with_ref};
+            use vmm_sys_util::ioctl::ioctl_with_ref;
             use vmm_sys_util::{ioctl_expr, ioctl_ioc_nr, ioctl_iow_nr};
             #[repr(C, packed)]
             #[derive(Debug, Copy, Clone)]
@@ -1760,10 +1766,15 @@ impl DeviceManager {
                 fd: i32,
                 resamplefd: i32,
             }
-            ioctl_iow_nr!(UIO_AZURE_SPHERE_IRQFD_SET, 0xf8, 0x1, uio_azure_sphere_irqfd_set);
+            ioctl_iow_nr!(
+                UIO_AZURE_SPHERE_IRQFD_SET,
+                0xf8,
+                0x1,
+                uio_azure_sphere_irqfd_set
+            );
             let ioctl_in = uio_azure_sphere_irqfd_set {
-                irq_index:  0,
-                fd:         eventfd.as_raw_fd(),
+                irq_index: 0,
+                fd: eventfd.as_raw_fd(),
                 resamplefd: resamplefd.as_raw_fd(),
             };
             let ret = unsafe { ioctl_with_ref(&dev_file, UIO_AZURE_SPHERE_IRQFD_SET(), &ioctl_in) };
@@ -1818,7 +1829,7 @@ impl DeviceManager {
                     flags,
                     dev_file.as_raw_fd(), /* Note: after mapping we can safely close the file */
                     offset as libc::off_t,
-                    )
+                )
             };
 
             if mmap_addr == libc::MAP_FAILED {
@@ -1829,13 +1840,12 @@ impl DeviceManager {
 
             /* map into guest */
             let _slot = self
-                    .memory_manager
-                    .lock()
-                    .unwrap()
-                    .create_userspace_mapping(
-                        addr, len, mmap_addr as u64, false, false, false,
-                    )
-                    .map_err(DeviceManagerError::MemoryManager)?;
+                .memory_manager
+                .lock()
+                .unwrap()
+                .create_userspace_mapping(addr, len, mmap_addr as u64, false, false, false)
+                .map_err(DeviceManagerError::MemoryManager)?;
+
             /* dont need to update guest_ram_mapping in memory manager... */
 
             /* TODO need to put it into device tree...? */
@@ -1844,13 +1854,8 @@ impl DeviceManager {
              */
             self.id_to_dev_info.insert(
                 (DeviceType::Rtc, uio_dev_info.name.clone()),
-                MmioDeviceInfo {
-                    addr,
-                    len,
-                    irq,
-                },
+                MmioDeviceInfo { addr, len, irq },
             );
-
         }
 
         Ok(())
@@ -3894,7 +3899,7 @@ impl DeviceManager {
         });
         node.resources.push(Resource::LegacyIrq(irq_num));
         node.migratable = Some(Arc::clone(&mmio_device_arc) as Arc<Mutex<dyn Migratable>>);
-        node.mmio_device_handle =  Some(Arc::clone(&mmio_device_arc));
+        node.mmio_device_handle = Some(Arc::clone(&mmio_device_arc));
         self.device_tree.lock().unwrap().insert(id, node);
 
         Ok(())

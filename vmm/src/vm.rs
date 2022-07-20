@@ -30,8 +30,6 @@ use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
 };
 use anyhow::anyhow;
-#[cfg(all(feature = "kvm", target_arch = "aarch64"))]
-use arch::PAGE_SIZE;
 use arch::get_host_cpu_phys_bits;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
@@ -40,6 +38,8 @@ use arch::x86_64::tdx::TdVmmDataRegionType;
 #[cfg(feature = "tdx")]
 use arch::x86_64::tdx::{TdVmmDataRegion, TdvfSection};
 use arch::EntryPoint;
+#[cfg(all(feature = "kvm", target_arch = "aarch64"))]
+use arch::PAGE_SIZE;
 #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use arch::{NumaNode, NumaNodes};
 use devices::AcpiNotificationFlags;
@@ -759,15 +759,16 @@ impl Vm {
             let craton_enabled = config.lock().unwrap().craton;
             if craton_enabled {
                 return Vm::new_craton(
-                        config,
-                        exit_evt,
-                        reset_evt,
-                        seccomp_action,
-                        hypervisor,
-                        activate_evt,
-                        serial_pty,
-                        console_pty,
-                        console_resize_pipe);
+                    config,
+                    exit_evt,
+                    reset_evt,
+                    seccomp_action,
+                    hypervisor,
+                    activate_evt,
+                    serial_pty,
+                    console_pty,
+                    console_resize_pipe,
+                );
             }
         }
         #[cfg(feature = "tdx")]
@@ -961,7 +962,6 @@ impl Vm {
         console_pty: Option<PtyPair>,
         console_resize_pipe: Option<File>,
     ) -> Result<Self> {
-
         let uio_devices_info = devices::legacy::uio::get_uio_devices_info().unwrap();
         let ram_dev_info: &devices::legacy::uio::UioDeviceInfo =
             match uio_devices_info.iter().find(|d| d.is_ram) {
@@ -1028,10 +1028,7 @@ impl Vm {
         // Create the VmOps structure, which implements the VmmOps trait.
         // And send it to the hypervisor.
 
-        let vm_ops: Arc<dyn VmmOps> = Arc::new(VmOps {
-            memory,
-            mmio_bus,
-        });
+        let vm_ops: Arc<dyn VmmOps> = Arc::new(VmOps { memory, mmio_bus });
 
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
         let cpu_manager = cpu::CpuManager::new(
@@ -1093,7 +1090,12 @@ impl Vm {
             .device_manager
             .lock()
             .unwrap()
-            .create_devices_craton(serial_pty, console_pty, console_resize_pipe, uio_devices_info)
+            .create_devices_craton(
+                serial_pty,
+                console_pty,
+                console_resize_pipe,
+                uio_devices_info,
+            )
             .map_err(Error::DeviceManager)?;
 
         Ok(new_vm)

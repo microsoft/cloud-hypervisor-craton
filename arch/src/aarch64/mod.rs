@@ -148,8 +148,6 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
     numa_nodes: &NumaNodes,
     dtb_path: Option<File>,
 ) -> super::Result<()> {
-
-    
     let fdt_final = if let Some(mut dtb_file) = dtb_path {
         fdt::fdt_file_to_vec(&mut dtb_file).map_err(|_| Error::SetupFdt)?
     } else {
@@ -221,11 +219,11 @@ pub fn set_fdt_addr(addr: u64) {
 
 /// Returns the memory address where the kernel could be loaded.
 pub fn get_kernel_start() -> u64 {
-    unsafe {KERNEL_START}
+    unsafe { KERNEL_START }
 }
 
 pub fn get_ram_start() -> u64 {
-    unsafe {RAM_64BIT_START}
+    unsafe { RAM_64BIT_START }
 }
 
 ///Return guest memory address where the uefi should be loaded.
@@ -235,7 +233,7 @@ pub fn get_uefi_start() -> u64 {
 
 // Auxiliary function to get the address where the device tree blob is loaded.
 fn get_fdt_addr() -> u64 {
-    unsafe{FDT_START}
+    unsafe { FDT_START }
 }
 
 pub fn get_host_cpu_phys_bits() -> u8 {
