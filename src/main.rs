@@ -710,6 +710,8 @@ mod unit_tests {
                 #[cfg(feature = "tdx")]
                 tdx: None,
                 platform: None,
+                craton: false,
+                dtb: None,
             };
 
             aver_eq!(tb, expected_vm_config, result_vm_config);

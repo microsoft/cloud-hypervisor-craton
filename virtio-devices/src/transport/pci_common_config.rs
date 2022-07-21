@@ -84,7 +84,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         data: &mut [u8],
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
@@ -114,7 +114,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         data: &[u8],
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         assert!(data.len() <= 8);
@@ -184,7 +184,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         value: u16,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
     ) {
         debug!("write_common_config_word: offset 0x{:x}", offset);
         match offset {
@@ -225,7 +225,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         value: u32,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         device: Arc<Mutex<dyn VirtioDevice>>,
     ) {
         debug!("write_common_config_dword: offset 0x{:x}", offset);
@@ -273,7 +273,7 @@ impl VirtioPciCommonConfig {
         &mut self,
         offset: u64,
         value: u64,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
     ) {
         debug!("write_common_config_qword: offset 0x{:x}", offset);
         match offset {
@@ -299,7 +299,7 @@ impl VirtioPciCommonConfig {
 
     fn with_queue_mut<F: FnOnce(&mut Queue<GuestMemoryAtomic<GuestMemoryMmap>>)>(
         &self,
-        queues: &mut Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+        queues: &mut [Queue<GuestMemoryAtomic<GuestMemoryMmap>>],
         f: F,
     ) {
         if let Some(queue) = queues.get_mut(self.queue_select as usize) {

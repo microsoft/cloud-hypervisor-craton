@@ -2208,9 +2208,7 @@ impl VmConfig {
                     } else {
                         return Err(ValidationError::MemoryZoneReused(
                             memory_zone.to_string(),
-                            *used_numa_node_memory_zones
-                                .get(&memory_zone.to_string())
-                                .unwrap(),
+                            *used_numa_node_memory_zones.get(memory_zone).unwrap(),
                             numa_node.guest_numa_id,
                         ));
                     }
@@ -3013,6 +3011,7 @@ mod tests {
             #[cfg(feature = "tdx")]
             tdx: None,
             platform: None,
+            craton: false,
             dtb: None,
         };
 
