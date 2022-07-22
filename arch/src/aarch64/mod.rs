@@ -4,28 +4,22 @@
 
 /// Module for the flattened device tree.
 pub mod fdt;
-/// Module for the global interrupt controller configuration.
-pub mod gic;
 /// Layout for this aarch64 system.
 pub mod layout;
-/// Logic for configuring aarch64 registers.
-pub mod regs;
 /// Module for loading UEFI binary.
 pub mod uefi;
 
 pub use self::fdt::DeviceInfoForFdt;
-use crate::{DeviceType, GuestMemoryMmap, NumaNodes, RegionType};
-use gic::GicDevice;
+use crate::{DeviceType, GuestMemoryMmap, NumaNodes, PciSpaceInfo, RegionType};
+use hypervisor::arch::aarch64::gic::Vgic;
 use log::{log_enabled, Level};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::Arc;
-use vm_memory::{
-    Address, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, GuestUsize,
-};
+use std::sync::{Arc, Mutex};
+use vm_memory::{Address, GuestAddress, GuestMemory, GuestUsize};
 
 /// Errors thrown while configuring aarch64 system.
 #[derive(Debug)]
@@ -37,21 +31,24 @@ pub enum Error {
     WriteFdtToMemory(fdt::Error),
 
     /// Failed to create a GIC.
-    SetupGic(gic::Error),
+    SetupGic,
 
     /// Failed to compute the initramfs address.
     InitramfsAddress,
 
     /// Error configuring the general purpose registers
-    RegsConfiguration(regs::Error),
+    RegsConfiguration(hypervisor::HypervisorCpuError),
 
     /// Error configuring the MPIDR register
     VcpuRegMpidr(hypervisor::HypervisorCpuError),
+
+    /// Error initializing PMU for vcpu
+    VcpuInitPmu,
 }
 
 impl From<Error> for super::Error {
     fn from(e: Error) -> super::Error {
-        super::Error::AArch64Setup(e)
+        super::Error::PlatformSpecific(e)
     }
 }
 
@@ -65,51 +62,29 @@ pub struct EntryPoint {
 
 /// Configure the specified VCPU, and return its MPIDR.
 pub fn configure_vcpu(
-    fd: &Arc<dyn hypervisor::Vcpu>,
+    vcpu: &Arc<dyn hypervisor::Vcpu>,
     id: u8,
     kernel_entry_point: Option<EntryPoint>,
-    vm_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
 ) -> super::Result<u64> {
     if let Some(kernel_entry_point) = kernel_entry_point {
-        regs::setup_regs(
-            fd,
+        vcpu.setup_regs(
             id,
             kernel_entry_point.entry_addr.raw_value(),
-            &vm_memory.memory(),
+            super::layout::FDT_START.raw_value(),
         )
         .map_err(Error::RegsConfiguration)?;
     }
 
-    let mpidr = fd.read_mpidr().map_err(Error::VcpuRegMpidr)?;
+    let mpidr = vcpu.read_mpidr().map_err(Error::VcpuRegMpidr)?;
     Ok(mpidr)
 }
 
 pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, RegionType)> {
-    // Normally UEFI should be loaded to a flash area at the beginning of memory.
-    // But now flash memory type is not supported.
-    // As a workaround, we take 4 MiB memory from the main RAM for UEFI.
-    // As a result, the RAM that the guest can see is less than what has been
-    // assigned in command line, when ACPI and UEFI is enabled.
-    let ram_deduction = if cfg!(feature = "acpi") {
-        layout::UEFI_SIZE
-    } else {
-        0
-    };
-
-    vec![
-        // 0 ~ 4 MiB: Reserved for UEFI space
-        #[cfg(feature = "acpi")]
-        (GuestAddress(0), layout::UEFI_SIZE as usize, RegionType::Ram),
-        #[cfg(not(feature = "acpi"))]
+    let mut regions = vec![
+        // 0 MiB ~ 256 MiB: UEFI, GIC and legacy devices
         (
             GuestAddress(0),
-            layout::UEFI_SIZE as usize,
-            RegionType::Reserved,
-        ),
-        // 4 MiB ~ 256 MiB: Gic and legacy devices
-        (
-            GuestAddress(layout::UEFI_SIZE),
-            (layout::MEM_32BIT_DEVICES_START.0 - layout::UEFI_SIZE) as usize,
+            layout::MEM_32BIT_DEVICES_START.0 as usize,
             RegionType::Reserved,
         ),
         // 256 MiB ~ 768 MiB: MMIO space
@@ -124,13 +99,39 @@ pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, Region
             layout::PCI_MMCONFIG_SIZE as usize,
             RegionType::Reserved,
         ),
-        // 1 GiB ~ : Ram
-        (
-            GuestAddress(get_ram_start()),
-            (size - ram_deduction) as usize,
+    ];
+
+    let ram_32bit_space_size =
+        layout::MEM_32BIT_RESERVED_START.unchecked_offset_from(layout::RAM_START);
+
+    // RAM space
+    // Case1: guest memory fits before the gap
+    if size as u64 <= ram_32bit_space_size {
+        regions.push((layout::RAM_START, size as usize, RegionType::Ram));
+    // Case2: guest memory extends beyond the gap
+    } else {
+        // Push memory before the gap
+        regions.push((
+            layout::RAM_START,
+            ram_32bit_space_size as usize,
             RegionType::Ram,
-        ),
-    ]
+        ));
+        // Other memory is placed after 4GiB
+        regions.push((
+            layout::RAM_64BIT_START,
+            (size - ram_32bit_space_size) as usize,
+            RegionType::Ram,
+        ));
+    }
+
+    // Add the 32-bit reserved memory hole as a reserved region
+    regions.push((
+        layout::MEM_32BIT_RESERVED_START,
+        layout::MEM_32BIT_RESERVED_SIZE as usize,
+        RegionType::Reserved,
+    ));
+
+    regions
 }
 
 /// Configures the system and should be called once per vm before starting vcpu threads.
@@ -142,14 +143,13 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
     vcpu_topology: Option<(u8, u8, u8)>,
     device_info: &HashMap<(DeviceType, String), T, S>,
     initrd: &Option<super::InitramfsConfig>,
-    pci_space_address: &Option<(u64, u64)>,
+    pci_space_info: &[PciSpaceInfo],
     virtio_iommu_bdf: Option<u32>,
-    gic_device: &dyn GicDevice,
+    gic_device: &Arc<Mutex<dyn Vgic>>,
     numa_nodes: &NumaNodes,
     dtb_path: Option<File>,
+    pmu_supported: bool,
 ) -> super::Result<()> {
-
-    
     let fdt_final = if let Some(mut dtb_file) = dtb_path {
         fdt::fdt_file_to_vec(&mut dtb_file).map_err(|_| Error::SetupFdt)?
     } else {
@@ -161,9 +161,10 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
             device_info,
             gic_device,
             initrd,
-            pci_space_address,
+            pci_space_info,
             numa_nodes,
             virtio_iommu_bdf,
+            pmu_supported,
         )
         .map_err(|_| Error::SetupFdt)?
     };
@@ -190,51 +191,51 @@ pub fn initramfs_load_addr(
             if guest_mem.address_in_range(offset) {
                 Ok(offset.raw_value())
             } else {
-                Err(super::Error::AArch64Setup(Error::InitramfsAddress))
+                Err(super::Error::PlatformSpecific(Error::InitramfsAddress))
             }
         }
-        None => Err(super::Error::AArch64Setup(Error::InitramfsAddress)),
+        None => Err(super::Error::PlatformSpecific(Error::InitramfsAddress)),
     }
 }
 
-static mut KERNEL_START: u64 = layout::KERNEL_START;
-static mut RAM_64BIT_START: u64 = layout::RAM_64BIT_START;
-static mut FDT_START: u64 = layout::FDT_START;
+static mut KERNEL_START: GuestAddress = layout::KERNEL_START;
+static mut RAM_64BIT_START: GuestAddress = layout::RAM_64BIT_START;
+static mut FDT_START: GuestAddress = layout::FDT_START;
 
 pub fn set_kernel_start(start: u64) {
     unsafe {
-        KERNEL_START = start;
+        KERNEL_START = GuestAddress(start);
     };
 }
 
 pub fn set_ram_start(start: u64) {
     unsafe {
-        RAM_64BIT_START = start;
+        RAM_64BIT_START = GuestAddress(start);
     };
 }
 
 pub fn set_fdt_addr(addr: u64) {
     unsafe {
-        FDT_START = addr;
+        FDT_START = GuestAddress(addr);
     };
 }
 
 /// Returns the memory address where the kernel could be loaded.
-pub fn get_kernel_start() -> u64 {
+pub fn get_kernel_start() -> GuestAddress {
     unsafe {KERNEL_START}
 }
 
-pub fn get_ram_start() -> u64 {
+pub fn get_ram_start() -> GuestAddress {
     unsafe {RAM_64BIT_START}
 }
 
 ///Return guest memory address where the uefi should be loaded.
-pub fn get_uefi_start() -> u64 {
+pub fn get_uefi_start() -> GuestAddress {
     layout::UEFI_START
 }
 
 // Auxiliary function to get the address where the device tree blob is loaded.
-fn get_fdt_addr() -> u64 {
+fn get_fdt_addr() -> GuestAddress {
     unsafe{FDT_START}
 }
 
@@ -257,11 +258,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_arch_memory_regions_dram() {
-        let regions = arch_memory_regions((1usize << 32) as u64); //4GB
+    fn test_arch_memory_regions_dram_2gb() {
+        let regions = arch_memory_regions((1usize << 31) as u64); //2GB
         assert_eq!(5, regions.len());
-        assert_eq!(GuestAddress(layout::RAM_64BIT_START), regions[4].0);
-        assert_eq!(1usize << 32, regions[4].1);
+        assert_eq!(layout::RAM_START, regions[3].0);
+        assert_eq!((1usize << 31), regions[3].1);
+        assert_eq!(RegionType::Ram, regions[3].2);
+        assert_eq!(RegionType::Reserved, regions[4].2);
+    }
+
+    #[test]
+    fn test_arch_memory_regions_dram_4gb() {
+        let regions = arch_memory_regions((1usize << 32) as u64); //4GB
+        let ram_32bit_space_size =
+            layout::MEM_32BIT_RESERVED_START.unchecked_offset_from(layout::RAM_START) as usize;
+        assert_eq!(6, regions.len());
+        assert_eq!(layout::RAM_START, regions[3].0);
+        assert_eq!(ram_32bit_space_size as usize, regions[3].1);
+        assert_eq!(RegionType::Ram, regions[3].2);
+        assert_eq!(RegionType::Reserved, regions[5].2);
         assert_eq!(RegionType::Ram, regions[4].2);
+        assert_eq!(((1usize << 32) - ram_32bit_space_size), regions[4].1);
     }
 }

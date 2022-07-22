@@ -1,9 +1,41 @@
+def runWorkers = true
 pipeline{
 	agent none
 	stages {
 		stage ('Early checks') {
 			agent { node { label 'built-in' } }
 			stages {
+				stage ('Checkout') {
+					steps {
+						checkout scm
+					}
+				}
+				stage ('Check for documentation only changes') {
+					when {
+						expression {
+							return docsFileOnly()
+						}
+					}
+					steps {
+						script {
+							runWorkers = false
+							echo "Documentation only changes, no need to run the CI"
+						}
+					}
+				}
+				stage ('Check for fuzzer cargo files only changes') {
+					when {
+						expression {
+							return fuzzCargoFileOnly()
+						}
+					}
+					steps {
+						script {
+							runWorkers = false
+							echo "Fuzzer cargo files only changes, no need to run the CI"
+						}
+					}
+				}
 				stage ('Check for RFC/WIP builds') {
 					when {
   						changeRequest comparator: 'REGEXP', title: '.*(rfc|RFC|wip|WIP).*'
@@ -22,13 +54,24 @@ pipeline{
 			}
 		}
 		stage ('Build') {
-            		parallel {
+			parallel {
 				stage ('Worker build') {
-					agent { node { label 'hirsute' } }
+					agent { node { label 'focal' } }
+					when {
+						beforeAgent true
+						expression {
+							return runWorkers
+						}
+					}
 					stages {
 						stage ('Checkout') {
 							steps {
 								checkout scm
+							}
+						}
+						stage ('Prepare environment') {
+							steps {
+								sh "scripts/prepare_vdpa.sh"
 							}
 						}
 						stage ('Run OpenAPI tests') {
@@ -54,6 +97,12 @@ pipeline{
 				}
 				stage ('AArch64 worker build') {
 					agent { node { label 'bionic-arm64' } }
+					when {
+						beforeAgent true
+						expression {
+							return runWorkers
+						}
+					}
 					stages {
 						stage ('Checkout') {
 							steps {
@@ -62,7 +111,7 @@ pipeline{
 						}
 						stage ('Run unit tests') {
 							steps {
-								sh "scripts/dev_cli.sh tests --unit"
+								sh "scripts/dev_cli.sh tests --unit --libc musl"
 							}
 						}
 						stage ('Run integration tests') {
@@ -71,7 +120,7 @@ pipeline{
 							}
 							steps {
 								sh "sudo modprobe openvswitch"
-								sh "scripts/dev_cli.sh tests --integration"
+								sh "scripts/dev_cli.sh tests --integration --libc musl"
 							}
 						}
 					}
@@ -83,11 +132,22 @@ pipeline{
 					}
 				}
 				stage ('Worker build (musl)') {
-					agent { node { label 'hirsute' } }
+					agent { node { label 'focal' } }
+					when {
+						beforeAgent true
+						expression {
+							return runWorkers
+						}
+					}
 					stages {
 						stage ('Checkout') {
 							steps {
 								checkout scm
+							}
+						}
+						stage ('Prepare environment') {
+							steps {
+								sh "scripts/prepare_vdpa.sh"
 							}
 						}
 						stage ('Run unit tests for musl') {
@@ -110,7 +170,12 @@ pipeline{
 					agent { node { label 'bionic-sgx' } }
 					when {
 						beforeAgent true
-						branch 'main'
+						allOf {
+							branch 'main'
+							expression {
+								return runWorkers
+							}
+						}
 					}
 					stages {
 						stage ('Checkout') {
@@ -146,7 +211,12 @@ pipeline{
 					agent { node { label 'bionic-vfio' } }
 					when {
 						beforeAgent true
-						branch 'main'
+						allOf {
+							branch 'main'
+							expression {
+								return runWorkers
+							}
+						}
 					}
 					stages {
 						stage ('Checkout') {
@@ -179,7 +249,13 @@ pipeline{
 					}
 				}
 				stage ('Worker build - Windows guest') {
-					agent { node { label 'hirsute' } }
+					agent { node { label 'focal' } }
+					when {
+						beforeAgent true
+						expression {
+							return runWorkers
+						}
+					}
 					environment {
         					AZURE_CONNECTION_STRING = credentials('46b4e7d6-315f-4cc1-8333-b58780863b9b')
 					}
@@ -189,11 +265,14 @@ pipeline{
 								checkout scm
 							}
 						}
+						stage ('Install azure-cli') {
+							steps {
+								installAzureCli()
+							}
+						}
 						stage ('Download assets') {
 							steps {
-								sh "sudo apt install -y azure-cli"
 								sh "mkdir ${env.HOME}/workloads"
-								sh 'az storage blob download --container-name private-images --file "$HOME/workloads/OVMF-4b47d0c6c8.fd" --name OVMF-4b47d0c6c8.fd --connection-string "$AZURE_CONNECTION_STRING"'
 								sh 'az storage blob download --container-name private-images --file "$HOME/workloads/windows-server-2019.raw" --name windows-server-2019.raw --connection-string "$AZURE_CONNECTION_STRING"'
 							}
 						}
@@ -216,7 +295,13 @@ pipeline{
 					}
 				}
 				stage ('Worker build - Live Migration') {
-					agent { node { label 'hirsute-small' } }
+					agent { node { label 'focal-small' } }
+					when {
+						beforeAgent true
+						expression {
+							return runWorkers
+						}
+					}
 					stages {
 						stage ('Checkout') {
 							steps {
@@ -239,6 +324,39 @@ pipeline{
 							steps {
 								sh "sudo modprobe openvswitch"
 								sh "scripts/dev_cli.sh tests --integration-live-migration --libc musl"
+							}
+						}
+					}
+				}
+				stage ('Worker build - Metrics') {
+					agent { node { label 'focal-metrics' } }
+					when {
+						branch 'main'
+						beforeAgent true
+						expression {
+							return runWorkers
+						}
+					}
+					environment {
+						METRICS_PUBLISH_KEY = credentials('52e0945f-ce7a-43d1-87af-67d1d87cc40f')
+					}
+					stages {
+						stage ('Checkout') {
+							steps {
+								checkout scm
+							}
+						}
+						stage ('Run metrics tests') {
+							options {
+								timeout(time: 1, unit: 'HOURS')
+							}
+							steps {
+								sh 'scripts/dev_cli.sh tests --metrics -- -- --report-file /root/workloads/metrics.json'
+							}
+						}
+						stage ('Upload metrics report') {
+							steps {
+								sh 'curl -X PUT https://cloud-hypervisor-metrics.azurewebsites.net/api/publishmetrics -H "x-functions-key: $METRICS_PUBLISH_KEY" -T ~/workloads/metrics.json'
 							}
 						}
 					}
@@ -277,4 +395,34 @@ def cancelPreviousBuilds() {
 				build.doStop()
 			}
 		}
+}
+
+def installAzureCli() {
+	sh "sudo apt install -y ca-certificates curl apt-transport-https lsb-release gnupg"
+	sh "curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/microsoft.gpg > /dev/null"
+	sh "echo \"deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ focal main\" | sudo tee /etc/apt/sources.list.d/azure-cli.list"
+	sh "sudo apt update"
+	sh "sudo apt install -y azure-cli"
+}
+
+def boolean docsFileOnly() {
+    if (env.CHANGE_TARGET == null) {
+        return false;
+    }
+
+    return sh(
+        returnStatus: true,
+        script: "git diff --name-only origin/${env.CHANGE_TARGET}... | grep -v '\\.md'"
+    ) != 0
+}
+
+def boolean fuzzCargoFileOnly() {
+    if (env.CHANGE_TARGET == null) {
+        return false;
+    }
+
+    return sh(
+        returnStatus: true,
+        script: "git diff --name-only origin/${env.CHANGE_TARGET}... | grep -v -E 'fuzz\\/Cargo.(toml|lock)'"
+    ) != 0
 }

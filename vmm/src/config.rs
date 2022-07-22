@@ -8,14 +8,15 @@ use net_util::MacAddr;
 use option_parser::{
     ByteSized, IntegerList, OptionParser, OptionParserError, StringList, Toggle, Tuple,
 };
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
 use std::convert::From;
 use std::fmt;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::result;
 use std::str::FromStr;
-
+use thiserror::Error;
 use virtio_devices::{RateLimiterConfig, TokenBucketConfig};
 
 pub const DEFAULT_VCPUS: u8 = 1;
@@ -36,14 +37,12 @@ pub const DEFAULT_NUM_PCI_SEGMENTS: u16 = 1;
 const MAX_NUM_PCI_SEGMENTS: u16 = 16;
 
 /// Errors associated with VM configuration parameters.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// Filesystem tag is missing
     ParseFsTagMissing,
     /// Filesystem socket is missing
     ParseFsSockMissing,
-    /// Cannot have dax=off along with cache_size parameter.
-    InvalidCacheSizeWithDaxOff,
     /// Missing persistent memory file parameter.
     ParsePmemFileMissing,
     /// Missing vsock socket path parameter.
@@ -54,6 +53,8 @@ pub enum Error {
     ParseRestoreSourceUrlMissing,
     /// Error parsing CPU options
     ParseCpus(OptionParserError),
+    /// Invalid CPU features
+    InvalidCpuFeatures(String),
     /// Error parsing memory options
     ParseMemory(OptionParserError),
     /// Error parsing memory zone options
@@ -106,9 +107,13 @@ pub enum Error {
     ParseUserDeviceSocketMissing,
     /// Failed parsing platform parameters
     ParsePlatform(OptionParserError),
+    /// Failed parsing vDPA device
+    ParseVdpa(OptionParserError),
+    /// Missing path for vDPA device
+    ParseVdpaPathMissing,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Error)]
 pub enum ValidationError {
     /// Both console and serial are tty.
     DoubleTtyMode,
@@ -132,6 +137,9 @@ pub enum ValidationError {
     CpuTopologyCount,
     /// One part of the CPU topology was zero
     CpuTopologyZeroPart,
+    #[cfg(target_arch = "aarch64")]
+    /// Dies per package must be 1
+    CpuTopologyDiesPerPackage,
     /// Virtio needs a min of 2 queues
     VnetQueueLowerThan2,
     /// The input queue number for virtio_net must match the number of input fds
@@ -145,9 +153,6 @@ pub enum ValidationError {
     /// CPU Hotplug is not permitted with TDX
     #[cfg(feature = "tdx")]
     TdxNoCpuHotplug,
-    /// Specifying kernel is not permitted with TDX
-    #[cfg(feature = "tdx")]
-    TdxKernelSpecified,
     /// Insuffient vCPUs for queues
     TooManyQueues,
     /// Need shared memory for vfio-user
@@ -158,6 +163,18 @@ pub enum ValidationError {
     InvalidNumPciSegments(u16),
     /// Invalid PCI segment id
     InvalidPciSegment(u16),
+    /// Balloon too big
+    BalloonLargerThanRam(u64, u64),
+    /// On a IOMMU segment but not behind IOMMU
+    OnIommuSegment(u16),
+    // On a IOMMU segment but IOMMU not suported
+    IommuNotSupportedOnSegment(u16),
+    // Identifier is not unique
+    IdentifierNotUnique(String),
+    /// Invalid identifier
+    InvalidIdentifier(String),
+    /// Placing the device behind a virtual IOMMU is not supported
+    IommuNotSupported,
 }
 
 type ValidationResult<T> = std::result::Result<T, ValidationError>;
@@ -182,6 +199,8 @@ impl fmt::Display for ValidationError {
                 f,
                 "Product of CPU topology parts does not match maximum vCPUs"
             ),
+            #[cfg(target_arch = "aarch64")]
+            CpuTopologyDiesPerPackage => write!(f, "Dies per package must be 1"),
             VnetQueueLowerThan2 => write!(f, "Number of queues to virtio_net less than 2"),
             VnetQueueFdMismatch => write!(
                 f,
@@ -197,10 +216,6 @@ impl fmt::Display for ValidationError {
             #[cfg(feature = "tdx")]
             TdxNoCpuHotplug => {
                 write!(f, "CPU hotplug is not permitted with TDX")
-            }
-            #[cfg(feature = "tdx")]
-            TdxKernelSpecified => {
-                write!(f, "Direct kernel boot is not permitted with TDX")
             }
             TooManyQueues => {
                 write!(f, "Number of vCPUs is insufficient for number of queues")
@@ -223,7 +238,37 @@ impl fmt::Display for ValidationError {
                 )
             }
             InvalidPciSegment(pci_segment) => {
-                write!(f, "Invalid PCI segment id{}", pci_segment)
+                write!(f, "Invalid PCI segment id: {}", pci_segment)
+            }
+            BalloonLargerThanRam(balloon_size, ram_size) => {
+                write!(
+                    f,
+                    "Ballon size ({}) greater than RAM ({})",
+                    balloon_size, ram_size
+                )
+            }
+            OnIommuSegment(pci_segment) => {
+                write!(
+                    f,
+                    "Device is on an IOMMU PCI segment ({}) but not placed behind IOMMU",
+                    pci_segment
+                )
+            }
+            IommuNotSupportedOnSegment(pci_segment) => {
+                write!(
+                    f,
+                    "Device is on an IOMMU PCI segment ({}) but does not support being placed behind IOMMU",
+                    pci_segment
+                )
+            }
+            IdentifierNotUnique(s) => {
+                write!(f, "Identifier {} is not unique", s)
+            }
+            InvalidIdentifier(s) => {
+                write!(f, "Identifier {} is invalid", s)
+            }
+            IommuNotSupported => {
+                write!(f, "Device does not support being placed behind IOMMU")
             }
         }
     }
@@ -238,15 +283,12 @@ impl fmt::Display for Error {
                 write!(f, "Error parsing --console: invalid console mode given")
             }
             ParseCpus(o) => write!(f, "Error parsing --cpus: {}", o),
-
+            InvalidCpuFeatures(o) => write!(f, "Invalid feature in --cpus features list: {}", o),
             ParseDevice(o) => write!(f, "Error parsing --device: {}", o),
             ParseDevicePathMissing => write!(f, "Error parsing --device: path missing"),
             ParseFileSystem(o) => write!(f, "Error parsing --fs: {}", o),
             ParseFsSockMissing => write!(f, "Error parsing --fs: socket missing"),
             ParseFsTagMissing => write!(f, "Error parsing --fs: tag missing"),
-            InvalidCacheSizeWithDaxOff => {
-                write!(f, "Error parsing --fs: cache_size used with dax=on")
-            }
             ParsePersistentMemory(o) => write!(f, "Error parsing --pmem: {}", o),
             ParsePmemFileMissing => write!(f, "Error parsing --pmem: file missing"),
             ParseVsock(o) => write!(f, "Error parsing --vsock: {}", o),
@@ -278,7 +320,17 @@ impl fmt::Display for Error {
             #[cfg(feature = "tdx")]
             FirmwarePathMissing => write!(f, "TDX firmware missing"),
             ParsePlatform(o) => write!(f, "Error parsing --platform: {}", o),
+            ParseVdpa(o) => write!(f, "Error parsing --vdpa: {}", o),
+            ParseVdpaPathMissing => write!(f, "Error parsing --vdpa: path missing"),
         }
+    }
+}
+
+pub fn add_to_config<T>(items: &mut Option<Vec<T>>, item: T) {
+    if let Some(items) = items {
+        items.push(item);
+    } else {
+        *items = Some(vec![item]);
     }
 }
 
@@ -301,6 +353,7 @@ pub struct VmParams<'a> {
     pub console: &'a str,
     pub devices: Option<Vec<&'a str>>,
     pub user_devices: Option<Vec<&'a str>>,
+    pub vdpa: Option<Vec<&'a str>>,
     pub vsock: Option<&'a str>,
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<&'a str>>,
@@ -308,6 +361,8 @@ pub struct VmParams<'a> {
     pub watchdog: bool,
     #[cfg(feature = "tdx")]
     pub tdx: Option<&'a str>,
+    #[cfg(feature = "gdb")]
+    pub gdb: bool,
     pub platform: Option<&'a str>,
     pub craton: bool,
     pub dtb: Option<&'a str>,
@@ -334,6 +389,7 @@ impl<'a> VmParams<'a> {
         let pmem: Option<Vec<&str>> = args.values_of("pmem").map(|x| x.collect());
         let devices: Option<Vec<&str>> = args.values_of("device").map(|x| x.collect());
         let user_devices: Option<Vec<&str>> = args.values_of("user-device").map(|x| x.collect());
+        let vdpa: Option<Vec<&str>> = args.values_of("vdpa").map(|x| x.collect());
         let vsock: Option<&str> = args.value_of("vsock");
         #[cfg(target_arch = "x86_64")]
         let sgx_epc: Option<Vec<&str>> = args.values_of("sgx-epc").map(|x| x.collect());
@@ -342,8 +398,11 @@ impl<'a> VmParams<'a> {
         let platform = args.value_of("platform");
         #[cfg(feature = "tdx")]
         let tdx = args.value_of("tdx");
+        #[cfg(feature = "gdb")]
+        let gdb = args.is_present("gdb");
         let craton = args.is_present("craton");
         let dtb = args.value_of("dtb");
+
         VmParams {
             cpus,
             memory,
@@ -361,6 +420,7 @@ impl<'a> VmParams<'a> {
             console,
             devices,
             user_devices,
+            vdpa,
             vsock,
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
@@ -368,6 +428,8 @@ impl<'a> VmParams<'a> {
             watchdog,
             #[cfg(feature = "tdx")]
             tdx,
+            #[cfg(feature = "gdb")]
+            gdb,
             platform,
             craton,
             dtb,
@@ -375,7 +437,7 @@ impl<'a> VmParams<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum HotplugMethod {
     Acpi,
     VirtioMem,
@@ -404,17 +466,23 @@ impl FromStr for HotplugMethod {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CpuAffinity {
     pub vcpu: u8,
     pub host_cpus: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CpuFeatures {
+    #[cfg(all(feature = "amx", target_arch = "x86_64"))]
+    pub amx: bool,
 }
 
 pub enum CpuTopologyParseError {
     InvalidValue(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CpuTopology {
     pub threads_per_core: u8,
     pub cores_per_die: u8,
@@ -455,7 +523,7 @@ fn default_cpuconfig_max_phys_bits() -> u8 {
     DEFAULT_MAX_PHYS_BITS
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CpusConfig {
     pub boot_vcpus: u8,
     pub max_vcpus: u8,
@@ -467,6 +535,8 @@ pub struct CpusConfig {
     pub max_phys_bits: u8,
     #[serde(default)]
     pub affinity: Option<Vec<CpuAffinity>>,
+    #[serde(default)]
+    pub features: CpuFeatures,
 }
 
 impl CpusConfig {
@@ -478,7 +548,8 @@ impl CpusConfig {
             .add("topology")
             .add("kvm_hyperv")
             .add("max_phys_bits")
-            .add("affinity");
+            .add("affinity")
+            .add("features");
         parser.parse(cpus).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u8 = parser
@@ -510,6 +581,27 @@ impl CpusConfig {
                     })
                     .collect()
             });
+        let features_list = parser
+            .convert::<StringList>("features")
+            .map_err(Error::ParseCpus)?
+            .unwrap_or_default();
+        // Some ugliness here as the features being checked might be disabled
+        // at compile time causing the below allow and the need to specify the
+        // ref type in the match.
+        // The issue will go away once kvm_hyperv is moved under the features
+        // list as it will always be checked for.
+        #[allow(unused_mut)]
+        let mut features = CpuFeatures::default();
+        for s in features_list.0 {
+            match <std::string::String as AsRef<str>>::as_ref(&s) {
+                #[cfg(all(feature = "amx", target_arch = "x86_64"))]
+                "amx" => {
+                    features.amx = true;
+                    Ok(())
+                }
+                _ => Err(Error::InvalidCpuFeatures(s)),
+            }?;
+        }
 
         Ok(CpusConfig {
             boot_vcpus,
@@ -518,6 +610,7 @@ impl CpusConfig {
             kvm_hyperv,
             max_phys_bits,
             affinity,
+            features,
         })
     }
 }
@@ -531,6 +624,7 @@ impl Default for CpusConfig {
             kvm_hyperv: false,
             max_phys_bits: DEFAULT_MAX_PHYS_BITS,
             affinity: None,
+            features: CpuFeatures::default(),
         }
     }
 }
@@ -539,23 +633,40 @@ fn default_platformconfig_num_pci_segments() -> u16 {
     DEFAULT_NUM_PCI_SEGMENTS
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PlatformConfig {
     #[serde(default = "default_platformconfig_num_pci_segments")]
     pub num_pci_segments: u16,
+    #[serde(default)]
+    pub iommu_segments: Option<Vec<u16>>,
+    #[serde(default)]
+    pub serial_number: Option<String>,
 }
 
 impl PlatformConfig {
     pub fn parse(platform: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("num_pci_segments");
-        parser.parse(platform).map_err(Error::ParseCpus)?;
+        parser.add("iommu_segments");
+        parser.add("serial_number");
+        parser.parse(platform).map_err(Error::ParsePlatform)?;
 
         let num_pci_segments: u16 = parser
             .convert("num_pci_segments")
             .map_err(Error::ParsePlatform)?
             .unwrap_or(DEFAULT_NUM_PCI_SEGMENTS);
-        Ok(PlatformConfig { num_pci_segments })
+        let iommu_segments = parser
+            .convert::<IntegerList>("iommu_segments")
+            .map_err(Error::ParsePlatform)?
+            .map(|v| v.0.iter().map(|e| *e as u16).collect());
+        let serial_number = parser
+            .convert("serial_number")
+            .map_err(Error::ParsePlatform)?;
+        Ok(PlatformConfig {
+            num_pci_segments,
+            iommu_segments,
+            serial_number,
+        })
     }
 
     pub fn validate(&self) -> ValidationResult<()> {
@@ -563,6 +674,14 @@ impl PlatformConfig {
             return Err(ValidationError::InvalidNumPciSegments(
                 self.num_pci_segments,
             ));
+        }
+
+        if let Some(iommu_segments) = &self.iommu_segments {
+            for segment in iommu_segments {
+                if *segment >= self.num_pci_segments {
+                    return Err(ValidationError::InvalidPciSegment(*segment));
+                }
+            }
         }
 
         Ok(())
@@ -573,11 +692,13 @@ impl Default for PlatformConfig {
     fn default() -> Self {
         PlatformConfig {
             num_pci_segments: DEFAULT_NUM_PCI_SEGMENTS,
+            iommu_segments: None,
+            serial_number: None,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MemoryZoneConfig {
     pub id: String,
     pub size: u64,
@@ -599,7 +720,7 @@ pub struct MemoryZoneConfig {
     pub prefault: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MemoryConfig {
     pub size: u64,
     #[serde(default)]
@@ -804,17 +925,17 @@ impl Default for MemoryConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct KernelConfig {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct InitramfsConfig {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CmdlineConfig {
     pub args: String,
 }
@@ -829,7 +950,7 @@ impl CmdlineConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DiskConfig {
     pub path: Option<PathBuf>,
     #[serde(default)]
@@ -1044,9 +1165,19 @@ impl DiskConfig {
             return Err(ValidationError::TooManyQueues);
         }
 
+        if self.vhost_user && self.iommu {
+            return Err(ValidationError::IommuNotSupported);
+        }
+
         if let Some(platform_config) = vm_config.platform.as_ref() {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
             }
         }
 
@@ -1054,7 +1185,7 @@ impl DiskConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum VhostMode {
     Client,
     Server,
@@ -1083,7 +1214,7 @@ impl FromStr for VhostMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NetConfig {
     #[serde(default = "default_netconfig_tap")]
     pub tap: Option<String>,
@@ -1334,9 +1465,19 @@ impl NetConfig {
             return Err(ValidationError::TooManyQueues);
         }
 
+        if self.vhost_user && self.iommu {
+            return Err(ValidationError::IommuNotSupported);
+        }
+
         if let Some(platform_config) = vm_config.platform.as_ref() {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
             }
         }
 
@@ -1344,7 +1485,7 @@ impl NetConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RngConfig {
     pub src: PathBuf,
     #[serde(default)]
@@ -1381,22 +1522,27 @@ impl Default for RngConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BalloonConfig {
     pub size: u64,
     /// Option to deflate the balloon in case the guest is out of memory.
     #[serde(default)]
     pub deflate_on_oom: bool,
+    /// Option to enable free page reporting from the guest.
+    #[serde(default)]
+    pub free_page_reporting: bool,
 }
 
 impl BalloonConfig {
     pub const SYNTAX: &'static str =
-        "Balloon parameters \"size=<balloon_size>,deflate_on_oom=on|off\"";
+        "Balloon parameters \"size=<balloon_size>,deflate_on_oom=on|off,\
+        free_page_reporting=on|off\"";
 
     pub fn parse(balloon: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("size");
         parser.add("deflate_on_oom");
+        parser.add("free_page_reporting");
         parser.parse(balloon).map_err(Error::ParseBalloon)?;
 
         let size = parser
@@ -1411,14 +1557,21 @@ impl BalloonConfig {
             .unwrap_or(Toggle(false))
             .0;
 
+        let free_page_reporting = parser
+            .convert::<Toggle>("free_page_reporting")
+            .map_err(Error::ParseBalloon)?
+            .unwrap_or(Toggle(false))
+            .0;
+
         Ok(BalloonConfig {
             size,
             deflate_on_oom,
+            free_page_reporting,
         })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FsConfig {
     pub tag: String,
     pub socket: PathBuf,
@@ -1426,10 +1579,6 @@ pub struct FsConfig {
     pub num_queues: usize,
     #[serde(default = "default_fsconfig_queue_size")]
     pub queue_size: u16,
-    #[serde(default = "default_fsconfig_dax")]
-    pub dax: bool,
-    #[serde(default = "default_fsconfig_cache_size")]
-    pub cache_size: u64,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -1444,14 +1593,6 @@ fn default_fsconfig_queue_size() -> u16 {
     1024
 }
 
-fn default_fsconfig_dax() -> bool {
-    true
-}
-
-fn default_fsconfig_cache_size() -> u64 {
-    0x0002_0000_0000
-}
-
 impl Default for FsConfig {
     fn default() -> Self {
         Self {
@@ -1459,8 +1600,6 @@ impl Default for FsConfig {
             socket: PathBuf::new(),
             num_queues: default_fsconfig_num_queues(),
             queue_size: default_fsconfig_queue_size(),
-            dax: default_fsconfig_dax(),
-            cache_size: default_fsconfig_cache_size(),
             id: None,
             pci_segment: 0,
         }
@@ -1470,15 +1609,12 @@ impl Default for FsConfig {
 impl FsConfig {
     pub const SYNTAX: &'static str = "virtio-fs parameters \
     \"tag=<tag_name>,socket=<socket_path>,num_queues=<number_of_queues>,\
-    queue_size=<size_of_each_queue>,dax=on|off,cache_size=<DAX cache size: \
-    default 8Gib>,id=<device_id>,pci_segment=<segment_id>\"";
+    queue_size=<size_of_each_queue>,id=<device_id>,pci_segment=<segment_id>\"";
 
     pub fn parse(fs: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("tag")
-            .add("dax")
-            .add("cache_size")
             .add("queue_size")
             .add("num_queues")
             .add("socket")
@@ -1498,22 +1634,6 @@ impl FsConfig {
             .map_err(Error::ParseFileSystem)?
             .unwrap_or_else(default_fsconfig_num_queues);
 
-        let dax = parser
-            .convert::<Toggle>("dax")
-            .map_err(Error::ParseFileSystem)?
-            .unwrap_or_else(|| Toggle(default_fsconfig_dax()))
-            .0;
-
-        if parser.is_set("cache_size") && !dax {
-            return Err(Error::InvalidCacheSizeWithDaxOff);
-        }
-
-        let cache_size = parser
-            .convert::<ByteSized>("cache_size")
-            .map_err(Error::ParseFileSystem)?
-            .unwrap_or_else(|| ByteSized(default_fsconfig_cache_size()))
-            .0;
-
         let id = parser.get("id");
 
         let pci_segment = parser
@@ -1526,8 +1646,6 @@ impl FsConfig {
             socket,
             num_queues,
             queue_size,
-            dax,
-            cache_size,
             id,
             pci_segment,
         })
@@ -1542,21 +1660,27 @@ impl FsConfig {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
             }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) {
+                    return Err(ValidationError::IommuNotSupportedOnSegment(
+                        self.pci_segment,
+                    ));
+                }
+            }
         }
 
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct PmemConfig {
     pub file: PathBuf,
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]
     pub iommu: bool,
-    #[serde(default)]
-    pub mergeable: bool,
     #[serde(default)]
     pub discard_writes: bool,
     #[serde(default)]
@@ -1568,13 +1692,12 @@ pub struct PmemConfig {
 impl PmemConfig {
     pub const SYNTAX: &'static str = "Persistent memory parameters \
     \"file=<backing_file_path>,size=<persistent_memory_size>,iommu=on|off,\
-    mergeable=on|off,discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>\"";
+    discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>\"";
     pub fn parse(pmem: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("size")
             .add("file")
-            .add("mergeable")
             .add("iommu")
             .add("discard_writes")
             .add("id")
@@ -1586,11 +1709,6 @@ impl PmemConfig {
             .convert::<ByteSized>("size")
             .map_err(Error::ParsePersistentMemory)?
             .map(|v| v.0);
-        let mergeable = parser
-            .convert::<Toggle>("mergeable")
-            .map_err(Error::ParsePersistentMemory)?
-            .unwrap_or(Toggle(false))
-            .0;
         let iommu = parser
             .convert::<Toggle>("iommu")
             .map_err(Error::ParsePersistentMemory)?
@@ -1611,7 +1729,6 @@ impl PmemConfig {
             file,
             size,
             iommu,
-            mergeable,
             discard_writes,
             id,
             pci_segment,
@@ -1623,13 +1740,19 @@ impl PmemConfig {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
             }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
         }
 
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ConsoleOutputMode {
     Off,
     Pty,
@@ -1638,7 +1761,7 @@ pub enum ConsoleOutputMode {
     Null,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ConsoleConfig {
     #[serde(default = "default_consoleconfig_file")]
     pub file: Option<PathBuf>,
@@ -1708,7 +1831,7 @@ impl ConsoleConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct DeviceConfig {
     pub path: PathBuf,
     #[serde(default)]
@@ -1755,13 +1878,19 @@ impl DeviceConfig {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
             }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
         }
 
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct UserDeviceConfig {
     pub socket: PathBuf,
     #[serde(default)]
@@ -1800,12 +1929,97 @@ impl UserDeviceConfig {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
             }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) {
+                    return Err(ValidationError::IommuNotSupportedOnSegment(
+                        self.pci_segment,
+                    ));
+                }
+            }
         }
 
         Ok(())
     }
 }
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct VdpaConfig {
+    pub path: PathBuf,
+    #[serde(default = "default_vdpaconfig_num_queues")]
+    pub num_queues: usize,
+    #[serde(default)]
+    pub iommu: bool,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub pci_segment: u16,
+}
+
+fn default_vdpaconfig_num_queues() -> usize {
+    1
+}
+
+impl VdpaConfig {
+    pub const SYNTAX: &'static str = "vDPA device \
+        \"path=<device_path>,num_queues=<number_of_queues>,iommu=on|off,\
+        id=<device_id>,pci_segment=<segment_id>\"";
+    pub fn parse(vdpa: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser
+            .add("path")
+            .add("num_queues")
+            .add("iommu")
+            .add("id")
+            .add("pci_segment");
+        parser.parse(vdpa).map_err(Error::ParseVdpa)?;
+
+        let path = parser
+            .get("path")
+            .map(PathBuf::from)
+            .ok_or(Error::ParseVdpaPathMissing)?;
+        let num_queues = parser
+            .convert("num_queues")
+            .map_err(Error::ParseVdpa)?
+            .unwrap_or_else(default_vdpaconfig_num_queues);
+        let iommu = parser
+            .convert::<Toggle>("iommu")
+            .map_err(Error::ParseVdpa)?
+            .unwrap_or(Toggle(false))
+            .0;
+        let id = parser.get("id");
+        let pci_segment = parser
+            .convert("pci_segment")
+            .map_err(Error::ParseVdpa)?
+            .unwrap_or_default();
+
+        Ok(VdpaConfig {
+            path,
+            num_queues,
+            iommu,
+            id,
+            pci_segment,
+        })
+    }
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct VsockConfig {
     pub cid: u64,
     pub socket: PathBuf,
@@ -1863,6 +2077,12 @@ impl VsockConfig {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
             }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
         }
 
         Ok(())
@@ -1870,7 +2090,7 @@ impl VsockConfig {
 }
 
 #[cfg(feature = "tdx")]
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct TdxConfig {
     pub firmware: PathBuf,
 }
@@ -1890,7 +2110,7 @@ impl TdxConfig {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct SgxEpcConfig {
     pub id: String,
     #[serde(default)]
@@ -1924,7 +2144,7 @@ impl SgxEpcConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct NumaDistance {
     #[serde(default)]
     pub destination: u32,
@@ -1932,7 +2152,7 @@ pub struct NumaDistance {
     pub distance: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct NumaConfig {
     #[serde(default)]
     pub guest_numa_id: u32,
@@ -2001,7 +2221,7 @@ impl NumaConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct RestoreConfig {
     pub source_url: PathBuf,
     #[serde(default)]
@@ -2035,12 +2255,12 @@ impl RestoreConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct DtbConfig {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VmConfig {
     #[serde(default)]
     pub cpus: CpusConfig,
@@ -2064,6 +2284,7 @@ pub struct VmConfig {
     pub console: ConsoleConfig,
     pub devices: Option<Vec<DeviceConfig>>,
     pub user_devices: Option<Vec<UserDeviceConfig>>,
+    pub vdpa: Option<Vec<VdpaConfig>>,
     pub vsock: Option<VsockConfig>,
     #[serde(default)]
     pub iommu: bool,
@@ -2074,13 +2295,37 @@ pub struct VmConfig {
     pub watchdog: bool,
     #[cfg(feature = "tdx")]
     pub tdx: Option<TdxConfig>,
+    #[cfg(feature = "gdb")]
+    pub gdb: bool,
     pub platform: Option<PlatformConfig>,
     pub craton: bool,
     pub dtb: Option<DtbConfig>,
 }
 
 impl VmConfig {
-    pub fn validate(&self) -> ValidationResult<()> {
+    fn validate_identifier(
+        id_list: &mut BTreeSet<String>,
+        id: &Option<String>,
+    ) -> ValidationResult<()> {
+        if let Some(id) = id.as_ref() {
+            if id.starts_with("__") {
+                return Err(ValidationError::InvalidIdentifier(id.clone()));
+            }
+
+            if !id_list.insert(id.clone()) {
+                return Err(ValidationError::IdentifierNotUnique(id.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
+    // Also enables virtio-iommu if the config needs it
+    // Returns the list of unique identifiers provided through the
+    // configuration.
+    pub fn validate(&mut self) -> ValidationResult<BTreeSet<String>> {
+        let mut id_list = BTreeSet::new();
+
         #[cfg(not(feature = "tdx"))]
         self.kernel.as_ref().ok_or(ValidationError::KernelMissing)?;
 
@@ -2092,9 +2337,6 @@ impl VmConfig {
             }
             if tdx_enabled && (self.cpus.max_vcpus != self.cpus.boot_vcpus) {
                 return Err(ValidationError::TdxNoCpuHotplug);
-            }
-            if tdx_enabled && self.kernel.is_some() {
-                return Err(ValidationError::TdxKernelSpecified);
             }
         }
 
@@ -2127,6 +2369,9 @@ impl VmConfig {
                     return Err(ValidationError::VhostUserMissingSocket);
                 }
                 disk.validate(self)?;
+                self.iommu |= disk.iommu;
+
+                Self::validate_identifier(&mut id_list, &disk.id)?;
             }
         }
 
@@ -2136,6 +2381,9 @@ impl VmConfig {
                     return Err(ValidationError::VhostUserRequiresSharedMemory);
                 }
                 net.validate(self)?;
+                self.iommu |= net.iommu;
+
+                Self::validate_identifier(&mut id_list, &net.id)?;
             }
         }
 
@@ -2145,14 +2393,22 @@ impl VmConfig {
             }
             for fs in fses {
                 fs.validate(self)?;
+
+                Self::validate_identifier(&mut id_list, &fs.id)?;
             }
         }
 
         if let Some(pmems) = &self.pmem {
             for pmem in pmems {
                 pmem.validate(self)?;
+                self.iommu |= pmem.iommu;
+
+                Self::validate_identifier(&mut id_list, &pmem.id)?;
             }
         }
+
+        self.iommu |= self.rng.iommu;
+        self.iommu |= self.console.iommu;
 
         if let Some(t) = &self.cpus.topology {
             if t.threads_per_core == 0
@@ -2161,6 +2417,14 @@ impl VmConfig {
                 || t.packages == 0
             {
                 return Err(ValidationError::CpuTopologyZeroPart);
+            }
+
+            // The setting of dies doesen't apply on AArch64.
+            // Only '1' value is accepted, so its impact on the vcpu topology
+            // setting can be ignored.
+            #[cfg(target_arch = "aarch64")]
+            if t.dies_per_package != 1 {
+                return Err(ValidationError::CpuTopologyDiesPerPackage);
             }
 
             let total = t.threads_per_core * t.cores_per_die * t.dies_per_package * t.packages;
@@ -2185,17 +2449,51 @@ impl VmConfig {
 
             for user_device in user_devices {
                 user_device.validate(self)?;
+
+                Self::validate_identifier(&mut id_list, &user_device.id)?;
+            }
+        }
+
+        if let Some(vdpa_devices) = &self.vdpa {
+            for vdpa_device in vdpa_devices {
+                vdpa_device.validate(self)?;
+                self.iommu |= vdpa_device.iommu;
+
+                Self::validate_identifier(&mut id_list, &vdpa_device.id)?;
+            }
+        }
+
+        if let Some(balloon) = &self.balloon {
+            let mut ram_size = self.memory.size;
+
+            if let Some(zones) = &self.memory.zones {
+                for zone in zones {
+                    ram_size += zone.size;
+                }
+            }
+
+            if balloon.size >= ram_size {
+                return Err(ValidationError::BalloonLargerThanRam(
+                    balloon.size,
+                    ram_size,
+                ));
             }
         }
 
         if let Some(devices) = &self.devices {
             for device in devices {
                 device.validate(self)?;
+                self.iommu |= device.iommu;
+
+                Self::validate_identifier(&mut id_list, &device.id)?;
             }
         }
 
         if let Some(vsock) = &self.vsock {
             vsock.validate(self)?;
+            self.iommu |= vsock.iommu;
+
+            Self::validate_identifier(&mut id_list, &vsock.id)?;
         }
 
         if let Some(numa) = &self.numa {
@@ -2208,9 +2506,7 @@ impl VmConfig {
                     } else {
                         return Err(ValidationError::MemoryZoneReused(
                             memory_zone.to_string(),
-                            *used_numa_node_memory_zones
-                                .get(&memory_zone.to_string())
-                                .unwrap(),
+                            *used_numa_node_memory_zones.get(memory_zone).unwrap(),
                             numa_node.guest_numa_id,
                         ));
                     }
@@ -2218,22 +2514,37 @@ impl VmConfig {
             }
         }
 
-        self.platform.as_ref().map(|p| p.validate()).transpose()?;
+        if let Some(zones) = &self.memory.zones {
+            for zone in zones.iter() {
+                let id = zone.id.clone();
+                Self::validate_identifier(&mut id_list, &Some(id))?;
+            }
+        }
 
-        Ok(())
+        #[cfg(target_arch = "x86_64")]
+        if let Some(sgx_epcs) = &self.sgx_epc {
+            for sgx_epc in sgx_epcs.iter() {
+                let id = sgx_epc.id.clone();
+                Self::validate_identifier(&mut id_list, &Some(id))?;
+            }
+        }
+
+        self.platform.as_ref().map(|p| p.validate()).transpose()?;
+        self.iommu |= self
+            .platform
+            .as_ref()
+            .map(|p| p.iommu_segments.is_some())
+            .unwrap_or_default();
+
+        Ok(id_list)
     }
 
     pub fn parse(vm_params: VmParams) -> Result<Self> {
-        let mut iommu = false;
-
         let mut disks: Option<Vec<DiskConfig>> = None;
         if let Some(disk_list) = &vm_params.disks {
             let mut disk_config_list = Vec::new();
             for item in disk_list.iter() {
                 let disk_config = DiskConfig::parse(item)?;
-                if disk_config.iommu {
-                    iommu = true;
-                }
                 disk_config_list.push(disk_config);
             }
             disks = Some(disk_config_list);
@@ -2244,18 +2555,12 @@ impl VmConfig {
             let mut net_config_list = Vec::new();
             for item in net_list.iter() {
                 let net_config = NetConfig::parse(item)?;
-                if net_config.iommu {
-                    iommu = true;
-                }
                 net_config_list.push(net_config);
             }
             net = Some(net_config_list);
         }
 
         let rng = RngConfig::parse(vm_params.rng)?;
-        if rng.iommu {
-            iommu = true;
-        }
 
         let mut balloon: Option<BalloonConfig> = None;
         if let Some(balloon_params) = &vm_params.balloon {
@@ -2276,18 +2581,12 @@ impl VmConfig {
             let mut pmem_config_list = Vec::new();
             for item in pmem_list.iter() {
                 let pmem_config = PmemConfig::parse(item)?;
-                if pmem_config.iommu {
-                    iommu = true;
-                }
                 pmem_config_list.push(pmem_config);
             }
             pmem = Some(pmem_config_list);
         }
 
         let console = ConsoleConfig::parse(vm_params.console)?;
-        if console.iommu {
-            iommu = true;
-        }
         let serial = ConsoleConfig::parse(vm_params.serial)?;
 
         let mut devices: Option<Vec<DeviceConfig>> = None;
@@ -2295,9 +2594,6 @@ impl VmConfig {
             let mut device_config_list = Vec::new();
             for item in device_list.iter() {
                 let device_config = DeviceConfig::parse(item)?;
-                if device_config.iommu {
-                    iommu = true;
-                }
                 device_config_list.push(device_config);
             }
             devices = Some(device_config_list);
@@ -2313,12 +2609,19 @@ impl VmConfig {
             user_devices = Some(user_device_config_list);
         }
 
+        let mut vdpa: Option<Vec<VdpaConfig>> = None;
+        if let Some(vdpa_list) = &vm_params.vdpa {
+            let mut vdpa_config_list = Vec::new();
+            for item in vdpa_list.iter() {
+                let vdpa_config = VdpaConfig::parse(item)?;
+                vdpa_config_list.push(vdpa_config);
+            }
+            vdpa = Some(vdpa_config_list);
+        }
+
         let mut vsock: Option<VsockConfig> = None;
         if let Some(vs) = &vm_params.vsock {
             let vsock_config = VsockConfig::parse(vs)?;
-            if vsock_config.iommu {
-                iommu = true;
-            }
             vsock = Some(vsock_config);
         }
 
@@ -2370,7 +2673,11 @@ impl VmConfig {
                 path: PathBuf::from(k),
             });
         }
-        let config = VmConfig {
+
+        #[cfg(feature = "gdb")]
+        let gdb = vm_params.gdb;
+
+        let mut config = VmConfig {
             cpus: CpusConfig::parse(vm_params.cpus)?,
             memory: MemoryConfig::parse(vm_params.memory, vm_params.memory_zones)?,
             kernel,
@@ -2386,14 +2693,17 @@ impl VmConfig {
             console,
             devices,
             user_devices,
+            vdpa,
             vsock,
-            iommu,
+            iommu: false, // updated in VmConfig::validate()
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
             numa,
             watchdog: vm_params.watchdog,
             #[cfg(feature = "tdx")]
             tdx,
+            #[cfg(feature = "gdb")]
+            gdb,
             platform,
             craton: vm_params.craton,
             dtb,
@@ -2766,29 +3076,7 @@ mod tests {
                 ..Default::default()
             }
         );
-        // DAX on -> default cache size
-        assert_eq!(
-            FsConfig::parse("tag=mytag,socket=/tmp/sock,dax=on")?,
-            FsConfig {
-                socket: PathBuf::from("/tmp/sock"),
-                tag: "mytag".to_owned(),
-                dax: true,
-                cache_size: default_fsconfig_cache_size(),
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            FsConfig::parse("tag=mytag,socket=/tmp/sock,dax=on,cache_size=4G")?,
-            FsConfig {
-                socket: PathBuf::from("/tmp/sock"),
-                tag: "mytag".to_owned(),
-                dax: true,
-                cache_size: 4 << 30,
-                ..Default::default()
-            }
-        );
-        // Cache size without DAX is an error
-        assert!(FsConfig::parse("tag=mytag,socket=/tmp/sock,dax=off,cache_size=4G").is_err());
+
         Ok(())
     }
 
@@ -2815,11 +3103,10 @@ mod tests {
             }
         );
         assert_eq!(
-            PmemConfig::parse("file=/tmp/pmem,size=128M,iommu=on,mergeable=on,discard_writes=on")?,
+            PmemConfig::parse("file=/tmp/pmem,size=128M,iommu=on,discard_writes=on")?,
             PmemConfig {
                 file: PathBuf::from("/tmp/pmem"),
                 size: Some(128 << 20),
-                mergeable: true,
                 discard_writes: true,
                 iommu: true,
                 ..Default::default()
@@ -2930,6 +3217,31 @@ mod tests {
     }
 
     #[test]
+    fn test_vdpa_parsing() -> Result<()> {
+        // path is required
+        assert!(VdpaConfig::parse("").is_err());
+        assert_eq!(
+            VdpaConfig::parse("path=/dev/vhost-vdpa")?,
+            VdpaConfig {
+                path: PathBuf::from("/dev/vhost-vdpa"),
+                num_queues: 1,
+                id: None,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            VdpaConfig::parse("path=/dev/vhost-vdpa,num_queues=2,id=my_vdpa")?,
+            VdpaConfig {
+                path: PathBuf::from("/dev/vhost-vdpa"),
+                num_queues: 2,
+                id: Some("my_vdpa".to_owned()),
+                ..Default::default()
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_vsock_parsing() -> Result<()> {
         // socket and cid is required
         assert!(VsockConfig::parse("").is_err());
@@ -2958,7 +3270,7 @@ mod tests {
 
     #[test]
     fn test_config_validation() {
-        let valid_config = VmConfig {
+        let mut valid_config = VmConfig {
             cpus: CpusConfig {
                 boot_vcpus: 1,
                 max_vcpus: 1,
@@ -3004,6 +3316,7 @@ mod tests {
             },
             devices: None,
             user_devices: None,
+            vdpa: None,
             vsock: None,
             iommu: false,
             #[cfg(target_arch = "x86_64")]
@@ -3012,6 +3325,8 @@ mod tests {
             watchdog: false,
             #[cfg(feature = "tdx")]
             tdx: None,
+            #[cfg(feature = "gdb")]
+            gdb: false,
             platform: None,
             dtb: None,
         };
@@ -3021,21 +3336,33 @@ mod tests {
         let mut invalid_config = valid_config.clone();
         invalid_config.serial.mode = ConsoleOutputMode::Tty;
         invalid_config.console.mode = ConsoleOutputMode::Tty;
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::DoubleTtyMode)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.kernel = None;
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::KernelMissing)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.serial.mode = ConsoleOutputMode::File;
         invalid_config.serial.file = None;
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::ConsoleFileMissing)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.cpus.max_vcpus = 16;
         invalid_config.cpus.boot_vcpus = 32;
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::CpusMaxLowerThanBoot)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.cpus.max_vcpus = 16;
@@ -3046,7 +3373,10 @@ mod tests {
             dies_per_package: 1,
             packages: 2,
         });
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::CpuTopologyCount)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.disks = Some(vec![DiskConfig {
@@ -3054,14 +3384,21 @@ mod tests {
             path: Some(PathBuf::from("/path/to/image")),
             ..Default::default()
         }]);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::DiskSocketAndPath)
+        );
 
         let mut invalid_config = valid_config.clone();
+        invalid_config.memory.shared = true;
         invalid_config.disks = Some(vec![DiskConfig {
             vhost_user: true,
             ..Default::default()
         }]);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::VhostUserMissingSocket)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.disks = Some(vec![DiskConfig {
@@ -3069,7 +3406,10 @@ mod tests {
             vhost_socket: Some("/path/to/sock".to_owned()),
             ..Default::default()
         }]);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::VhostUserRequiresSharedMemory)
+        );
 
         let mut still_valid_config = valid_config.clone();
         still_valid_config.disks = Some(vec![DiskConfig {
@@ -3085,7 +3425,10 @@ mod tests {
             vhost_user: true,
             ..Default::default()
         }]);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::VhostUserRequiresSharedMemory)
+        );
 
         let mut still_valid_config = valid_config.clone();
         still_valid_config.net = Some(vec![NetConfig {
@@ -3101,13 +3444,19 @@ mod tests {
             fds: Some(vec![0]),
             ..Default::default()
         }]);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::VnetReservedFd)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.fs = Some(vec![FsConfig {
             ..Default::default()
         }]);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::VhostUserRequiresSharedMemory)
+        );
 
         let mut still_valid_config = valid_config.clone();
         still_valid_config.memory.shared = true;
@@ -3125,23 +3474,245 @@ mod tests {
         let mut invalid_config = valid_config.clone();
         invalid_config.memory.hugepages = false;
         invalid_config.memory.hugepage_size = Some(2 << 20);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::HugePageSizeWithoutHugePages)
+        );
 
         let mut invalid_config = valid_config.clone();
         invalid_config.memory.hugepages = true;
         invalid_config.memory.hugepage_size = Some(3 << 20);
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::InvalidHugePageSize(3 << 20))
+        );
 
         let mut still_valid_config = valid_config.clone();
         still_valid_config.platform = Some(PlatformConfig {
             num_pci_segments: 16,
+            ..Default::default()
         });
         assert!(still_valid_config.validate().is_ok());
 
-        let mut invalid_config = valid_config;
+        let mut invalid_config = valid_config.clone();
         invalid_config.platform = Some(PlatformConfig {
             num_pci_segments: 17,
+            ..Default::default()
         });
-        assert!(invalid_config.validate().is_err());
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::InvalidNumPciSegments(17))
+        );
+
+        let mut still_valid_config = valid_config.clone();
+        still_valid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        assert!(still_valid_config.validate().is_ok());
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![17, 18]),
+            ..Default::default()
+        });
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::InvalidPciSegment(17))
+        );
+
+        let mut still_valid_config = valid_config.clone();
+        still_valid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        still_valid_config.disks = Some(vec![DiskConfig {
+            iommu: true,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert!(still_valid_config.validate().is_ok());
+
+        let mut still_valid_config = valid_config.clone();
+        still_valid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        still_valid_config.net = Some(vec![NetConfig {
+            iommu: true,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert!(still_valid_config.validate().is_ok());
+
+        let mut still_valid_config = valid_config.clone();
+        still_valid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        still_valid_config.pmem = Some(vec![PmemConfig {
+            iommu: true,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert!(still_valid_config.validate().is_ok());
+
+        let mut still_valid_config = valid_config.clone();
+        still_valid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        still_valid_config.devices = Some(vec![DeviceConfig {
+            iommu: true,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert!(still_valid_config.validate().is_ok());
+
+        let mut still_valid_config = valid_config.clone();
+        still_valid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        still_valid_config.vsock = Some(VsockConfig {
+            iommu: true,
+            pci_segment: 1,
+            ..Default::default()
+        });
+        assert!(still_valid_config.validate().is_ok());
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.disks = Some(vec![DiskConfig {
+            iommu: false,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::OnIommuSegment(1))
+        );
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.net = Some(vec![NetConfig {
+            iommu: false,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::OnIommuSegment(1))
+        );
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.pmem = Some(vec![PmemConfig {
+            iommu: false,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::OnIommuSegment(1))
+        );
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.devices = Some(vec![DeviceConfig {
+            iommu: false,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::OnIommuSegment(1))
+        );
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.vsock = Some(VsockConfig {
+            iommu: false,
+            pci_segment: 1,
+            ..Default::default()
+        });
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::OnIommuSegment(1))
+        );
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.memory.shared = true;
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.user_devices = Some(vec![UserDeviceConfig {
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::IommuNotSupportedOnSegment(1))
+        );
+
+        let mut invalid_config = valid_config.clone();
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.vdpa = Some(vec![VdpaConfig {
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::OnIommuSegment(1))
+        );
+
+        let mut invalid_config = valid_config;
+        invalid_config.memory.shared = true;
+        invalid_config.platform = Some(PlatformConfig {
+            num_pci_segments: 16,
+            iommu_segments: Some(vec![1, 2, 3]),
+            ..Default::default()
+        });
+        invalid_config.fs = Some(vec![FsConfig {
+            pci_segment: 1,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            invalid_config.validate(),
+            Err(ValidationError::IommuNotSupportedOnSegment(1))
+        );
     }
 }

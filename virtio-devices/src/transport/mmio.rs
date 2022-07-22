@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
-use virtio_queue::AccessPlatform;
+use vm_virtio::{AccessPlatform, Translatable};
 use virtio_queue::Queue;
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
@@ -54,14 +54,10 @@ impl VirtioInterruptIntx {
 }
 
 impl VirtioInterrupt for VirtioInterruptIntx {
-    fn trigger(
-        &self,
-        int_type: &VirtioInterruptType,
-        _queue: Option<&Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
-    ) -> std::result::Result<(), std::io::Error> {
+    fn trigger(&self, int_type: VirtioInterruptType) -> std::result::Result<(), std::io::Error> {
         let status = match int_type {
             VirtioInterruptType::Config => INTERRUPT_STATUS_CONFIG_CHANGED,
-            VirtioInterruptType::Queue => INTERRUPT_STATUS_USED_RING,
+            VirtioInterruptType::Queue(queue_index) => INTERRUPT_STATUS_USED_RING,
         };
         self.interrupt_status
             .fetch_or(status as usize, Ordering::SeqCst);
@@ -83,6 +79,38 @@ struct VirtioMmioDeviceState {
 }
 
 impl VersionMapped for VirtioMmioDeviceState {}
+
+pub struct VirtioMmioDeviceActivator {
+    interrupt: Option<Arc<dyn VirtioInterrupt>>,
+    memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
+    device: Arc<Mutex<dyn VirtioDevice>>,
+    device_activated: Arc<AtomicBool>,
+    queues: Option<Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>>,
+    queue_evts: Option<Vec<EventFd>>,
+    barrier: Option<Arc<Barrier>>,
+    id: String,
+}
+
+impl VirtioMmioDeviceActivator {
+    pub fn activate(&mut self) -> ActivateResult {
+        self.device.lock().unwrap().activate(
+            self.memory.take().unwrap(),
+            self.interrupt.take().unwrap(),
+            self.queues.take().unwrap(),
+            self.queue_evts.take().unwrap(),
+        )?;
+        self.device_activated.store(true, Ordering::SeqCst);
+
+        if let Some(barrier) = self.barrier.take() {
+            info!("{}: Waiting for barrier", self.id);
+            barrier.wait();
+            info!("{}: Barrier released", self.id);
+        }
+
+        Ok(())
+    }
+}
+
 
 /// Implements the
 /// [MMIO](http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-1090002)
@@ -139,12 +167,10 @@ impl VirtioMmioDevice {
             .queue_max_sizes()
             .iter()
             .map(|&s| {
-                let mut queue = Queue::<
-                    GuestMemoryAtomic<GuestMemoryMmap>,
-                    virtio_queue::QueueState<GuestMemoryAtomic<GuestMemoryMmap>>,
-                >::new(memory.clone(), s);
-                queue.state.access_platform = access_platform.clone();
-                queue
+                Queue::<GuestMemoryAtomic<GuestMemoryMmap>, virtio_queue::QueueState>::new(
+                    memory.clone(),
+                    s,
+                )
             })
             .collect();
 
@@ -189,7 +215,6 @@ impl VirtioMmioDevice {
                     max_size: q.max_size(),
                     size: q.state.size,
                     ready: q.state.ready,
-                    vector: q.state.vector,
                     desc_table: q.state.desc_table.0,
                     avail_ring: q.state.avail_ring.0,
                     used_ring: q.state.used_ring.0,
@@ -213,7 +238,6 @@ impl VirtioMmioDevice {
             queue.state.max_size = state.queues[i].max_size;
             queue.state.size = state.queues[i].size;
             queue.state.ready = state.queues[i].ready;
-            queue.state.vector = state.queues[i].vector;
             queue.state.desc_table = GuestAddress(state.queues[i].desc_table);
             queue.state.avail_ring = GuestAddress(state.queues[i].avail_ring);
             queue.state.used_ring = GuestAddress(state.queues[i].used_ring);
@@ -283,7 +307,8 @@ impl VirtioMmioDevice {
                 let mem = self.memory.as_ref().unwrap().clone();
                 let mut device = self.device.lock().unwrap();
                 let mut queue_evts = Vec::new();
-                let mut queues = self.queues.clone();
+                let mut queues: Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>> =
+                    self.queues.iter().map(vm_virtio::clone_queue).collect();
                 queues.retain(|q| q.state.ready);
                 for (i, queue) in queues.iter().enumerate() {
                     queue_evts.push(self.queue_evts[i].try_clone().unwrap());

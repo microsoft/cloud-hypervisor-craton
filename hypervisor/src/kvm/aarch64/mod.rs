@@ -8,9 +8,8 @@
 //
 //
 
-///
-/// Export generically-named wrappers of kvm-bindings for Unix-based platforms
-///
+pub mod gic;
+
 use crate::kvm::{KvmError, KvmResult};
 use kvm_bindings::{
     kvm_mp_state, kvm_one_reg, kvm_regs, KVM_REG_ARM64, KVM_REG_ARM64_SYSREG,
@@ -23,7 +22,7 @@ use kvm_bindings::{
 pub use kvm_bindings::{
     kvm_one_reg as Register, kvm_regs as StandardRegisters, kvm_vcpu_init as VcpuInit, RegList,
 };
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 pub use {kvm_ioctls::Cap, kvm_ioctls::Kvm};
 
 // This macro gets the offset of a structure (i.e `str`) member (i.e `field`) without having

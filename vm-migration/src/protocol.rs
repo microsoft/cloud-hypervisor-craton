@@ -4,6 +4,7 @@
 //
 
 use crate::{MigratableError, VersionMapped};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
@@ -27,7 +28,24 @@ use vm_memory::ByteValued;
 // (n-2): Dest -> Source : sends "ok response"
 // (n-1): Source -> Dest : send "complete command"
 // n: Dest -> Source: sends "ok response"
-
+//
+// "Local version": (Handing FDs across socket for memory)
+// 1: Source establishes communication with destination (file socket or TCP connection.)
+// (The establishment is out of scope.)
+// 2: Source -> Dest : send "start command"
+// 3: Dest -> Source : sends "ok response" when read to accept state data
+// 4: Source -> Dest : sends "config command" followed by config data, length
+//                     in command is length of config data
+// 5: Dest -> Source : sends "ok response" when ready to accept memory data
+// 6: Source -> Dest : send "memory fd command" followed by u16 slot ID and FD for memory
+// 7: Dest -> Source : sends "ok response" when received
+// 8..(n-4): Repeat steps 6 and 7 until source has no more memory to send
+// (n-3): Source -> Dest : sends "state command" followed by state data, length
+//                     in command is length of config data
+// (n-2): Dest -> Source : sends "ok response"
+// (n-1): Source -> Dest : send "complete command"
+// n: Dest -> Source: sends "ok response"
+//
 // The destination can at any time send an "error response" to cancel
 // The source can at any time send an "abandon request" to cancel
 
@@ -41,6 +59,7 @@ pub enum Command {
     Memory,
     Complete,
     Abandon,
+    MemoryFd,
 }
 
 impl Default for Command {
@@ -85,6 +104,10 @@ impl Request {
         Self::new(Command::Memory, length)
     }
 
+    pub fn memory_fd(length: u64) -> Self {
+        Self::new(Command::MemoryFd, length)
+    }
+
     pub fn complete() -> Self {
         Self::new(Command::Complete, 0)
     }
@@ -116,7 +139,7 @@ impl Request {
 }
 
 #[repr(u16)]
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Status {
     Invalid,
     Ok,
