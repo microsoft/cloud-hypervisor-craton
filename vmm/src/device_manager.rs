@@ -1445,6 +1445,7 @@ impl DeviceManager {
         #[cfg(feature = "mmio_support")]
         {
             for handle in virtio_devices {
+                info!("DDDDDD: add_mmio_devices");
                 self.add_virtio_mmio_device(handle.id, handle.virtio_device, interrupt_manager)?;
             }
         }
@@ -3779,6 +3780,7 @@ impl DeviceManager {
         virtio_device: Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
         interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
     ) -> DeviceManagerResult<()> {
+        info!("DDDDDDDDDDD: add_virtio_mmio_device {}", virtio_device_id);
         let id = format!("{}-{}", VIRTIO_MMIO_DEVICE_NAME_PREFIX, virtio_device_id);
 
         // Create the new virtio-mmio node that will be added later to the
@@ -3893,6 +3895,7 @@ impl DeviceManager {
             self.activate_evt
                 .try_clone()
                 .map_err(DeviceManagerError::EventFd)?,
+            self.pending_activations.clone(),
         )
         .map_err(DeviceManagerError::VirtioDevice)?;
 
@@ -3933,7 +3936,7 @@ impl DeviceManager {
         node.migratable = Some(Arc::clone(&mmio_device_arc) as Arc<Mutex<dyn Migratable>>);
         node.mmio_device_handle =  Some(Arc::clone(&mmio_device_arc));
         self.device_tree.lock().unwrap().insert(id, node);
-
+        info!("DDDDD: add_virtio_mmio_device done");
         Ok(())
     }
 
@@ -4065,7 +4068,9 @@ impl DeviceManager {
     }
 
     pub fn activate_virtio_devices(&self) -> DeviceManagerResult<()> {
+        info!("DDDDDDDDDDDDDDDDDDD: mmio activate_virtio_devices   ffff");
         for mut activator in self.pending_activations.lock().unwrap().drain(..) {
+            info!("DDDDDDDDDDDDDDDDDDD: mmio activate_virtio_devices   for loop");
             activator
                 .activate()
                 .map_err(DeviceManagerError::VirtioActivate)?;
