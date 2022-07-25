@@ -55,6 +55,7 @@ impl VirtioInterruptIntx {
 
 impl VirtioInterrupt for VirtioInterruptIntx {
     fn trigger(&self, int_type: VirtioInterruptType) -> std::result::Result<(), std::io::Error> {
+        info!("DDDDDDDDDDDDDDDDDDD: mmio trigger");
         let status = match int_type {
             VirtioInterruptType::Config => INTERRUPT_STATUS_CONFIG_CHANGED,
             VirtioInterruptType::Queue(queue_index) => INTERRUPT_STATUS_USED_RING,
@@ -93,6 +94,7 @@ pub struct VirtioMmioDeviceActivator {
 
 impl VirtioMmioDeviceActivator {
     pub fn activate(&mut self) -> ActivateResult {
+        info!("DDDDDDDDDDDDDDDDDDD: mmio activate");
         self.device.lock().unwrap().activate(
             self.memory.take().unwrap(),
             self.interrupt.take().unwrap(),
@@ -236,6 +238,7 @@ impl VirtioMmioDevice {
         self.queue_select = state.queue_select;
         self.interrupt_status
             .store(state.interrupt_status, Ordering::SeqCst);
+        info!("MMIO: set_state set status  {:?}", state.driver_status);
         self.driver_status = state.driver_status;
 
         // Update virtqueues indexes for both available and used rings.
@@ -273,14 +276,15 @@ impl VirtioMmioDevice {
     }
 
     fn is_driver_ready(&self) -> bool {
-        info!("DDDDD: mmio is_driver_ready");
+        //info!("DDDDD: mmio is_driver_ready");
         let ready_bits = DEVICE_ACKNOWLEDGE | DEVICE_DRIVER | DEVICE_DRIVER_OK | DEVICE_FEATURES_OK;
+        info!("DDDD mmio {} Ready bits: {:#018b}, driver status: {:#018b}, Failed: {:#018b}", self.id, ready_bits, self.driver_status, DEVICE_FAILED);
         self.driver_status == ready_bits && self.driver_status & DEVICE_FAILED == 0
     }
 
     /// Determines if the driver has requested the device (re)init / reset itself
     fn is_driver_init(&self) -> bool {
-        info!("DDDDD: mmio is_driver_init");
+        //info!("DDDDD: mmio is_driver_init");
         self.driver_status == DEVICE_INIT
     }
 
@@ -376,8 +380,11 @@ impl VirtioMmioDevice {
     }
 
     fn needs_activation(&self) -> bool {
-        info!("DDDDD: mmio needs_activation");
-        !self.device_activated.load(Ordering::SeqCst) && self.is_driver_ready()
+        info!("DDDDD: mmio {} needs_activation", self.id);
+        let activated = self.device_activated.load(Ordering::SeqCst);
+        let ready = self.is_driver_ready();
+        info!("DDDDD {} needs_activation: activated {:?}, ready : {:?}", self.id, activated, ready);
+        !activated && ready
     }
 }
 
@@ -393,7 +400,7 @@ impl VirtioTransport for VirtioMmioDevice {
 
 impl BusDevice for VirtioMmioDevice {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-        info!("DDDDD: mmio read");
+        //info!("DDDDD: mmio read");
         match offset {
             0x00..=0xff if data.len() == 4 => {
                 let v = match offset {
@@ -469,7 +476,6 @@ impl BusDevice for VirtioMmioDevice {
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        info!("DDDDD: mmio read");
         fn hi(v: &mut GuestAddress, x: u32) {
             *v = (*v & 0xffff_ffff) | (u64::from(x) << 32)
         }
@@ -504,7 +510,7 @@ impl BusDevice for VirtioMmioDevice {
                         self.interrupt_status
                             .fetch_and(!(v as usize), Ordering::SeqCst);
                     }
-                    0x70 => self.driver_status = v,
+                    0x70 => {println!("mmio write : set device status : {:X}", v);self.driver_status = v},
                     0x80 => self.with_queue_mut(|q| lo(&mut q.state.desc_table, v)),
                     0x84 => self.with_queue_mut(|q| hi(&mut q.state.desc_table, v)),
                     0x90 => self.with_queue_mut(|q| lo(&mut q.state.avail_ring, v)),

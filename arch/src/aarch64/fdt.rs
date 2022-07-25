@@ -258,6 +258,7 @@ fn create_memory_node(
                 mem_reg_prop.push(memory_region_start_addr);
                 mem_reg_prop.push(memory_region_size);
                 // Set the node address the first non-zero regison address
+                #[cfg(feature = "acpi")]
                 if node_memory_addr == 0 {
                     node_memory_addr = memory_region_start_addr;
                 }

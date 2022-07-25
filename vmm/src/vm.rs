@@ -11,6 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use crate::config::NumaConfig;
 use crate::config::{
     add_to_config, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
@@ -47,6 +48,7 @@ use arch::x86_64::tdx::TdvfSection;
 use arch::EntryPoint;
 #[cfg(target_arch = "aarch64")]
 use arch::PciSpaceInfo;
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use arch::{NumaNode, NumaNodes};
 #[cfg(target_arch = "aarch64")]
 use devices::gic::GIC_V3_ITS_SNAPSHOT_ID;
@@ -72,6 +74,7 @@ use signal_hook::{
     iterator::Signals,
 };
 use std::cmp;
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -452,7 +455,8 @@ impl VmOps for VmOpsHandler {
         }
         match self.io_bus.write(port, data) {
             Err(vm_device::BusError::MissingAddressRange) => {
-                warn!("Guest PIO write to unregistered address 0x{:x}", port);
+                //warn!("Guest PIO write to unregistered address 0x{:x}", port);
+                {}
             }
             Ok(Some(barrier)) => {
                 info!("Waiting for barrier");
@@ -490,6 +494,7 @@ pub struct Vm {
     vm: Arc<dyn hypervisor::Vm>,
     #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
     saved_clock: Option<hypervisor::ClockData>,
+    #[cfg(feature = "acpi")]
     numa_nodes: NumaNodes,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
@@ -524,12 +529,7 @@ impl Vm {
             .transpose()
             .map_err(Error::KernelFile)?;
 
-        #[cfg(target_arch = "x86_64")]
-        let load_kernel_handle = if !restoring {
-            Self::load_kernel_async(&kernel, &memory_manager, &config)?
-        } else {
-            None
-        };
+        
 
         let boot_id_list = config
             .lock()
@@ -539,9 +539,7 @@ impl Vm {
 
         info!("Booting VM from config: {:?}", &config);
 
-        // Create NUMA nodes based on NumaConfig.
-        let numa_nodes =
-            Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
+        
 
         #[cfg(feature = "tdx")]
         let force_iommu = config.lock().unwrap().tdx.is_some();
@@ -552,7 +550,10 @@ impl Vm {
         let stop_on_boot = config.lock().unwrap().gdb;
         #[cfg(not(feature = "gdb"))]
         let stop_on_boot = false;
-
+        #[cfg(feature = "acpi")]
+        // Create NUMA nodes based on NumaConfig.
+        let numa_nodes =
+        Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
         let device_manager = DeviceManager::new(
             vm.clone(),
             config.clone(),
@@ -560,6 +561,7 @@ impl Vm {
             &exit_evt,
             &reset_evt,
             seccomp_action.clone(),
+            #[cfg(feature = "acpi")]
             numa_nodes.clone(),
             &activate_evt,
             force_iommu,
@@ -568,6 +570,12 @@ impl Vm {
             timestamp,
         )
         .map_err(Error::DeviceManager)?;
+        #[cfg(target_arch = "x86_64")]
+        let load_kernel_handle = if !restoring {
+            Self::load_kernel_async(&kernel, &memory_manager, &config, device_manager.clone())?
+        } else {
+            None
+        };
 
         let memory = memory_manager.lock().unwrap().guest_memory();
         #[cfg(target_arch = "x86_64")]
@@ -604,6 +612,7 @@ impl Vm {
             vm_ops,
             #[cfg(feature = "tdx")]
             tdx_enabled,
+            #[cfg(feature = "acpi")]
             &numa_nodes,
         )
         .map_err(Error::CpuManager)?;
@@ -634,6 +643,7 @@ impl Vm {
             vm,
             #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
             saved_clock: None,
+            #[cfg(feature = "acpi")]
             numa_nodes,
             seccomp_action: seccomp_action.clone(),
             exit_evt,
@@ -645,6 +655,7 @@ impl Vm {
         })
     }
 
+    #[cfg(feature = "acpi")]
     fn create_numa_nodes(
         configs: Option<Vec<NumaConfig>>,
         memory_manager: &Arc<Mutex<MemoryManager>>,
@@ -1005,6 +1016,7 @@ impl Vm {
         /* Nuno: no iommu please */
         let force_iommu = false;
         /* Nuno: numa_nodes will just be an empty BTree */
+        #[cfg(feature = "acpi")]
         let numa_nodes =
             Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
         let boot_id_list = config
@@ -1026,6 +1038,7 @@ impl Vm {
             &exit_evt,
             &reset_evt,
             seccomp_action.clone(),
+            #[cfg(feature = "acpi")]
             numa_nodes.clone(),
             &activate_evt,
             force_iommu,
@@ -1056,6 +1069,7 @@ impl Vm {
             hypervisor.clone(),
             seccomp_action.clone(),
             vm_ops,
+            #[cfg(feature = "pci_support")]
             &numa_nodes,
         )
         .map_err(Error::CpuManager)?;
@@ -1093,6 +1107,7 @@ impl Vm {
             cpu_manager,
             memory_manager,
             vm,
+            #[cfg(feature = "pci_support")]
             numa_nodes,
             seccomp_action: seccomp_action.clone(),
             exit_evt,
@@ -1136,17 +1151,19 @@ impl Vm {
 
     fn generate_cmdline(
         config: &Arc<Mutex<VmConfig>>,
-        #[cfg(target_arch = "aarch64")] device_manager: &Arc<Mutex<DeviceManager>>,
+        device_manager: &Arc<Mutex<DeviceManager>>,
     ) -> Result<Cmdline> {
         let mut cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
         cmdline
             .insert_str(&config.lock().unwrap().cmdline.args)
             .map_err(Error::CmdLineInsertStr)?;
 
-        #[cfg(target_arch = "aarch64")]
+        //#[cfg(target_arch = "aarch64")]
         for entry in device_manager.lock().unwrap().cmdline_additions() {
+            info!("DDDD: Cmdline: entry {}", entry);
             cmdline.insert_str(entry).map_err(Error::CmdLineInsertStr)?;
         }
+        info!("DDDD: Cmdline: {}", cmdline.as_str());
         Ok(cmdline)
     }
 
@@ -1273,6 +1290,7 @@ impl Vm {
         kernel: &Option<File>,
         memory_manager: &Arc<Mutex<MemoryManager>>,
         config: &Arc<Mutex<VmConfig>>,
+        device_manager: Arc<Mutex<DeviceManager>>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
         #[cfg(feature = "tdx")]
@@ -1290,7 +1308,7 @@ impl Vm {
                 std::thread::Builder::new()
                     .name("kernel_loader".into())
                     .spawn(move || {
-                        let cmdline = Self::generate_cmdline(&config)?;
+                        let cmdline = Self::generate_cmdline(&config, &device_manager)?;
                         Self::load_kernel(kernel, cmdline, memory_manager)
                     })
                     .map_err(Error::KernelLoadThreadSpawn)
@@ -1299,7 +1317,7 @@ impl Vm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn configure_system(&mut self, rsdp_addr: GuestAddress) -> Result<()> {
+    fn configure_system(&mut self, #[cfg(feature = "acpi")] rsdp_addr: GuestAddress) -> Result<()> {
         info!("Configuring system");
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
@@ -1309,7 +1327,11 @@ impl Vm {
         };
 
         let boot_vcpus = self.cpu_manager.lock().unwrap().boot_vcpus();
+        #[cfg(feature = "acpi")]
         let rsdp_addr = Some(rsdp_addr);
+        #[cfg(not(feature = "acpi"))]
+        let rsdp_addr = None;
+
         let sgx_epc_region = self
             .memory_manager
             .lock()
@@ -1340,7 +1362,7 @@ impl Vm {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn configure_system(&mut self, _rsdp_addr: GuestAddress) -> Result<()> {
+    fn configure_system(&mut self, #[cfg(feature = "acpi")] _rsdp_addr: GuestAddress) -> Result<()> {
         let cmdline = Self::generate_cmdline(&self.config, &self.device_manager)?;
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
         let vcpu_topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
@@ -1433,6 +1455,7 @@ impl Vm {
             &pci_space_info,
             virtio_iommu_bdf.map(|bdf| bdf.into()),
             &vgic,
+            #[cfg(feature = "acpi")]
             &self.numa_nodes,
             dtb_path,
             pmu_supported,
@@ -1534,6 +1557,7 @@ impl Vm {
                 .resize(desired_vcpus)
                 .map_err(Error::CpuManager)?
             {
+                #[cfg(feature = "pci_support")]
                 self.device_manager
                     .lock()
                     .unwrap()
@@ -1559,7 +1583,7 @@ impl Vm {
                     .unwrap()
                     .update_memory(new_region)
                     .map_err(Error::DeviceManager)?;
-
+                #[cfg(feature = "pci_support")]
                 match memory_config.hotplug_method {
                     HotplugMethod::Acpi => {
                         self.device_manager
@@ -2315,7 +2339,7 @@ impl Vm {
     // Creates ACPI tables
     // In case of TDX being used, this is a no-op since the tables will be
     // created and passed when populating the HOB.
-
+    #[cfg(feature = "pci_support")]
     fn create_acpi_tables(&self) -> Option<GuestAddress> {
         #[cfg(feature = "tdx")]
         if self.config.lock().unwrap().tdx.is_some() {
@@ -2323,7 +2347,7 @@ impl Vm {
         }
 
         let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
-
+        
         let rsdp_addr = crate::acpi::create_acpi_tables(
             &mem,
             &self.device_manager,
@@ -2369,7 +2393,7 @@ impl Vm {
         current_state.valid_transition(new_state)?;
 
         // Do earlier to parallelise with loading kernel
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
         let rsdp_addr = self.create_acpi_tables();
 
         self.setup_signal_handler()?;
@@ -2411,7 +2435,7 @@ impl Vm {
 
         // On aarch64 the ACPI tables depend on the vCPU mpidr which is only
         // available after they are configured
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
         let rsdp_addr = self.create_acpi_tables();
 
         // Configure shared state based on loaded kernel
@@ -2419,7 +2443,7 @@ impl Vm {
             .map(|_| {
                 // Safe to unwrap rsdp_addr as we know it can't be None when
                 // the entry_point is Some.
-                self.configure_system(rsdp_addr.unwrap())
+                self.configure_system(#[cfg(feature = "acpi")] rsdp_addr.unwrap())
             })
             .transpose()?;
 
@@ -2731,12 +2755,15 @@ impl Vm {
 
     #[cfg(target_arch = "x86_64")]
     pub fn power_button(&self) -> Result<()> {
+        #[cfg(feature = "acpi")]
         return self
             .device_manager
             .lock()
             .unwrap()
             .notify_power_button()
             .map_err(Error::PowerButton);
+        #[cfg(not(feature = "acpi"))]
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
     }
 
     #[cfg(target_arch = "aarch64")]

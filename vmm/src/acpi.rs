@@ -14,6 +14,7 @@ use acpi_tables::{aml::Aml, rsdp::Rsdp, sdt::Sdt};
 use arch::aarch64::DeviceInfoForFdt;
 #[cfg(target_arch = "aarch64")]
 use arch::DeviceType;
+#[cfg(feature = "acpi")]
 use arch::NumaNodes;
 
 use bitflags::bitflags;
