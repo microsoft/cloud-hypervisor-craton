@@ -364,7 +364,9 @@ pub struct VmParams<'a> {
     #[cfg(feature = "gdb")]
     pub gdb: bool,
     pub platform: Option<&'a str>,
+    #[cfg(target_arch = "aarch64")]
     pub craton: bool,
+    #[cfg(target_arch = "aarch64")]
     pub dtb: Option<&'a str>,
 }
 
@@ -400,7 +402,9 @@ impl<'a> VmParams<'a> {
         let tdx = args.value_of("tdx");
         #[cfg(feature = "gdb")]
         let gdb = args.is_present("gdb");
+        #[cfg(target_arch = "aarch64")]
         let craton = args.is_present("craton");
+        #[cfg(target_arch = "aarch64")]
         let dtb = args.value_of("dtb");
 
         VmParams {
@@ -431,7 +435,9 @@ impl<'a> VmParams<'a> {
             #[cfg(feature = "gdb")]
             gdb,
             platform,
+            #[cfg(target_arch = "aarch64")]
             craton,
+            #[cfg(target_arch = "aarch64")]
             dtb,
         }
     }
@@ -2298,7 +2304,9 @@ pub struct VmConfig {
     #[cfg(feature = "gdb")]
     pub gdb: bool,
     pub platform: Option<PlatformConfig>,
+    #[cfg(target_arch = "aarch64")]
     pub craton: bool,
+    #[cfg(target_arch = "aarch64")]
     pub dtb: Option<DtbConfig>,
 }
 
@@ -2668,6 +2676,7 @@ impl VmConfig {
         #[cfg(feature = "tdx")]
         let tdx = vm_params.tdx.map(TdxConfig::parse).transpose()?;
         let mut dtb: Option<DtbConfig> = None;
+        #[cfg(target_arch = "aarch64")]
         if let Some(k) = vm_params.dtb {
             dtb = Some(DtbConfig {
                 path: PathBuf::from(k),
@@ -2705,7 +2714,9 @@ impl VmConfig {
             #[cfg(feature = "gdb")]
             gdb,
             platform,
+            #[cfg(target_arch = "aarch64")]
             craton: vm_params.craton,
+            #[cfg(target_arch = "aarch64")]
             dtb,
         };
         config.validate().map_err(Error::Validation)?;

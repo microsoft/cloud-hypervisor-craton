@@ -711,8 +711,7 @@ mod tests {
 
     #[test]
     fn test_parse_iperf3_output() {
-        let output = r#"
-{
+        let output = r#[cfg(#[cfg(feature = "acpi")]{
 	"end":	{
 		"sum_sent":	{
 			"start":	0,
@@ -731,8 +730,7 @@ mod tests {
             23957198874.604115
         );
 
-        let output = r#"
-{
+        let output = r#[cfg(#[cfg(feature = "acpi")]{
 	"end":	{
 		"sum_received":	{
 			"start":	0,
@@ -766,8 +764,7 @@ mod tests {
 
     #[test]
     fn test_parse_boot_time_output() {
-        let output = r#"
-cloud-hypervisor: 161.167103ms: <vcpu0> INFO:vmm/src/vm.rs:392 -- [Debug I/O port: Kernel code 0x40] 0.132 seconds
+        let output = r#[cfg(#[cfg(feature = "acpi")]cloud-hypervisor: 161.167103ms: <vcpu0> INFO:vmm/src/vm.rs:392 -- [Debug I/O port: Kernel code 0x40] 0.132 seconds
 cloud-hypervisor: 613.57361ms: <vcpu0> INFO:vmm/src/vm.rs:392 -- [Debug I/O port: Kernel code 0x41] 0.5845 seconds
         "#;
 
@@ -776,8 +773,7 @@ cloud-hypervisor: 613.57361ms: <vcpu0> INFO:vmm/src/vm.rs:392 -- [Debug I/O port
 
     #[test]
     fn test_parse_fio_output() {
-        let output = r#"
-{
+        let output = r#[cfg(#[cfg(feature = "acpi")]{
   "jobs" : [
     {
       "read" : {
@@ -803,8 +799,7 @@ cloud-hypervisor: 613.57361ms: <vcpu0> INFO:vmm/src/vm.rs:392 -- [Debug I/O port
         );
         assert_eq!(parse_fio_output(output, &FioOps::Read, 1).unwrap(), bps);
 
-        let output = r#"
-{
+        let output = r#[cfg(#[cfg(feature = "acpi")]{
   "jobs" : [
     {
       "write" : {

@@ -818,6 +818,7 @@ impl Mem {
         region: &Arc<GuestRegionMmap>,
         resize: ResizeSender,
         seccomp_action: SeccompAction,
+        #[cfg(feature = "pci_support")]
         numa_node_id: Option<u16>,
         initial_size: u64,
         hugepages: bool,
@@ -859,7 +860,7 @@ impl Mem {
                 )
             })?;
         }
-
+        #[cfg(feature = "pci_support")]
         if let Some(node_id) = numa_node_id {
             avail_features |= 1u64 << VIRTIO_MEM_F_ACPI_PXM;
             config.node_id = node_id;

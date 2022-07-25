@@ -758,6 +758,10 @@ mod unit_tests {
             #[cfg(feature = "gdb")]
             gdb: false,
             platform: None,
+            #[cfg(target_arch = "aarch64")]
+            craton: false,
+            #[cfg(target_arch = "aarch64")]
+            dtb: None,
         };
 
         assert_eq!(expected_vm_config, result_vm_config);
