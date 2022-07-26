@@ -663,7 +663,6 @@ pub fn create_acpi_tables(
         prev_tbl_off = mcfg_offset;
     }
 
-
     // SPCR and DBG2
     #[cfg(target_arch = "aarch64")]
     {
@@ -748,7 +747,8 @@ pub fn create_acpi_tables(
     // VIOT
     #[cfg(feature = "pci_support")]
     {
-        if let Some((iommu_bdf, devices_bdf)) = device_manager.lock().unwrap().iommu_attached_devices()
+        if let Some((iommu_bdf, devices_bdf)) =
+            device_manager.lock().unwrap().iommu_attached_devices()
         {
             let viot = create_viot_table(iommu_bdf, devices_bdf);
 

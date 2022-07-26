@@ -38,8 +38,6 @@ use crate::{
     PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
 };
 use anyhow::anyhow;
-#[cfg(all(feature = "kvm", target_arch = "aarch64"))]
-use arch::PAGE_SIZE;
 use arch::get_host_cpu_phys_bits;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
@@ -48,7 +46,9 @@ use arch::x86_64::tdx::TdvfSection;
 use arch::EntryPoint;
 #[cfg(target_arch = "aarch64")]
 use arch::PciSpaceInfo;
-#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+#[cfg(all(feature = "kvm", target_arch = "aarch64"))]
+use arch::PAGE_SIZE;
+#[cfg(feature = "acpi")]
 use arch::{NumaNode, NumaNodes};
 #[cfg(target_arch = "aarch64")]
 use devices::gic::GIC_V3_ITS_SNAPSHOT_ID;
@@ -444,7 +444,8 @@ impl VmOps for VmOpsHandler {
         {
             use pci::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
 
-            if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port) {
+            if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port)
+            {
                 self.pci_config_io.lock().unwrap().write(
                     PCI_CONFIG_IO_PORT,
                     port - PCI_CONFIG_IO_PORT,
@@ -529,8 +530,6 @@ impl Vm {
             .transpose()
             .map_err(Error::KernelFile)?;
 
-        
-
         let boot_id_list = config
             .lock()
             .unwrap()
@@ -538,8 +537,6 @@ impl Vm {
             .map_err(Error::ConfigValidation)?;
 
         info!("Booting VM from config: {:?}", &config);
-
-        
 
         #[cfg(feature = "tdx")]
         let force_iommu = config.lock().unwrap().tdx.is_some();
@@ -553,7 +550,7 @@ impl Vm {
         #[cfg(feature = "acpi")]
         // Create NUMA nodes based on NumaConfig.
         let numa_nodes =
-        Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
+            Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
         let device_manager = DeviceManager::new(
             vm.clone(),
             config.clone(),
@@ -755,16 +752,17 @@ impl Vm {
             let craton_enabled = config.lock().unwrap().craton;
             if craton_enabled {
                 return Vm::new_craton(
-                        config,
-                        exit_evt,
-                        reset_evt,
-                        seccomp_action,
-                        hypervisor,
-                        activate_evt,
-                        serial_pty,
-                        console_pty,
-                        console_resize_pipe,
-                        timestamp);
+                    config,
+                    exit_evt,
+                    reset_evt,
+                    seccomp_action,
+                    hypervisor,
+                    activate_evt,
+                    serial_pty,
+                    console_pty,
+                    console_resize_pipe,
+                    timestamp,
+                );
             }
         }
 
@@ -973,7 +971,6 @@ impl Vm {
         console_resize_pipe: Option<File>,
         timestamp: Instant,
     ) -> Result<Self> {
-
         let uio_devices_info = devices::legacy::uio::get_uio_devices_info().unwrap();
         let ram_dev_info: &devices::legacy::uio::UioDeviceInfo =
             match uio_devices_info.iter().find(|d| d.is_ram) {
@@ -1020,10 +1017,10 @@ impl Vm {
         let numa_nodes =
             Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
         let boot_id_list = config
-        .lock()
-        .unwrap()
-        .validate()
-        .map_err(Error::ConfigValidation)?;
+            .lock()
+            .unwrap()
+            .validate()
+            .map_err(Error::ConfigValidation)?;
 
         info!("Booting VM from config: {:?}", &config);
         #[cfg(feature = "gdb")]
@@ -1044,7 +1041,7 @@ impl Vm {
             force_iommu,
             false,
             boot_id_list,
-            timestamp
+            timestamp,
         )
         .map_err(Error::DeviceManager)?;
 
@@ -1054,10 +1051,7 @@ impl Vm {
         let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
 
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
-        let vm_ops: Arc<dyn VmOps> = Arc::new(VmOpsHandler {
-            memory,
-            mmio_bus,
-        });
+        let vm_ops: Arc<dyn VmOps> = Arc::new(VmOpsHandler { memory, mmio_bus });
 
         let cpu_manager = cpu::CpuManager::new(
             &config.lock().unwrap().cpus.clone(),
@@ -1120,7 +1114,12 @@ impl Vm {
             .device_manager
             .lock()
             .unwrap()
-            .create_devices_craton(serial_pty, console_pty, console_resize_pipe, uio_devices_info)
+            .create_devices_craton(
+                serial_pty,
+                console_pty,
+                console_resize_pipe,
+                uio_devices_info,
+            )
             .map_err(Error::DeviceManager)?;
 
         Ok(new_vm)
@@ -1158,12 +1157,9 @@ impl Vm {
             .insert_str(&config.lock().unwrap().cmdline.args)
             .map_err(Error::CmdLineInsertStr)?;
 
-        //#[cfg(target_arch = "aarch64")]
         for entry in device_manager.lock().unwrap().cmdline_additions() {
-            info!("DDDD: Cmdline: entry {}", entry);
             cmdline.insert_str(entry).map_err(Error::CmdLineInsertStr)?;
         }
-        info!("DDDD: Cmdline: {}", cmdline.as_str());
         Ok(cmdline)
     }
 
@@ -1317,7 +1313,10 @@ impl Vm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn configure_system(&mut self, #[cfg(feature = "acpi")] rsdp_addr: GuestAddress) -> Result<()> {
+    fn configure_system(
+        &mut self,
+        #[cfg(feature = "acpi")] rsdp_addr: GuestAddress,
+    ) -> Result<()> {
         info!("Configuring system");
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
@@ -1362,7 +1361,10 @@ impl Vm {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn configure_system(&mut self, #[cfg(feature = "acpi")] _rsdp_addr: GuestAddress) -> Result<()> {
+    fn configure_system(
+        &mut self,
+        #[cfg(feature = "acpi")] _rsdp_addr: GuestAddress,
+    ) -> Result<()> {
         let cmdline = Self::generate_cmdline(&self.config, &self.device_manager)?;
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
         let vcpu_topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
@@ -2347,7 +2349,7 @@ impl Vm {
         }
 
         let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
-        
+
         let rsdp_addr = crate::acpi::create_acpi_tables(
             &mem,
             &self.device_manager,
@@ -2443,7 +2445,10 @@ impl Vm {
             .map(|_| {
                 // Safe to unwrap rsdp_addr as we know it can't be None when
                 // the entry_point is Some.
-                self.configure_system(#[cfg(feature = "acpi")] rsdp_addr.unwrap())
+                self.configure_system(
+                    #[cfg(feature = "acpi")]
+                    rsdp_addr.unwrap(),
+                )
             })
             .transpose()?;
 
@@ -2745,7 +2750,6 @@ impl Vm {
 
     pub fn activate_virtio_devices(&self) -> Result<()> {
         debug!("MMIO: activate_virtio_devices");
-        info!("DDDDDDDDDDDDDDDDDDD: mmio activate_virtio_devices");
         self.device_manager
             .lock()
             .unwrap()

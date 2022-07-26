@@ -229,7 +229,12 @@ impl vm::Vm for KvmVm {
     ///
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     ///
-    fn register_irqfd_with_resample(&self, fd: &EventFd, resamplefd: &EventFd, gsi: u32) -> vm::Result<()> {
+    fn register_irqfd_with_resample(
+        &self,
+        fd: &EventFd,
+        resamplefd: &EventFd,
+        gsi: u32,
+    ) -> vm::Result<()> {
         self.fd
             .register_irqfd_with_resample(fd, resamplefd, gsi)
             .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))

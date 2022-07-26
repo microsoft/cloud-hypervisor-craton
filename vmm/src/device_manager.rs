@@ -11,7 +11,7 @@
 
 use crate::config::{
     ConsoleOutputMode, DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig,
-    VdpaConfig, VhostMode, VmConfig, VsockConfig
+    VdpaConfig, VhostMode, VmConfig, VsockConfig,
 };
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::LegacyUserspaceInterruptManager;
@@ -46,11 +46,12 @@ use block_util::{
     fixed_vhd_async::FixedVhdDiskAsync, fixed_vhd_sync::FixedVhdDiskSync, qcow_sync::QcowDiskSync,
     raw_async::RawFileDisk, raw_sync::RawFileDiskSync, vhdx_sync::VhdxDiskSync, ImageType,
 };
-use devices::legacy::uio;
 #[cfg(target_arch = "aarch64")]
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
+#[cfg(target_arch = "aarch64")]
+use devices::legacy::uio;
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::Pl011;
 #[cfg(target_arch = "x86_64")]
@@ -58,7 +59,7 @@ use devices::legacy::Serial;
 use devices::{
     interrupt_controller, interrupt_controller::InterruptController, AcpiNotificationFlags,
 };
-use hypervisor::{DeviceFd, HypervisorVmError, IoEventAddress, DataMatch};
+use hypervisor::{DataMatch, DeviceFd, HypervisorVmError, IoEventAddress};
 use libc::{
     cfmakeraw, isatty, tcgetattr, tcsetattr, termios, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED,
     O_TMPFILE, PROT_READ, PROT_WRITE, TCSANOW,
@@ -88,18 +89,17 @@ use std::time::Instant;
 #[cfg(feature = "pci_support")]
 use vfio_ioctls::{VfioContainer, VfioDevice};
 use virtio_devices::transport::VirtioTransport;
-#[cfg(feature = "pci_support")]
-use virtio_devices::transport::{VirtioPciDevice, VirtioPciDeviceActivator};
 #[cfg(feature = "mmio_support")]
 use virtio_devices::transport::{VirtioMmioDevice, VirtioMmioDeviceActivator};
+#[cfg(feature = "pci_support")]
+use virtio_devices::transport::{VirtioPciDevice, VirtioPciDeviceActivator};
 use virtio_devices::vhost_user::VhostUserConfig;
 #[cfg(feature = "pci_support")]
-use virtio_devices::{
-    AccessPlatformMapping, VdpaDmaMapping, VirtioMemMappingSource,
-};
-#[cfg(feature = "pci_support")]
 use virtio_devices::IommuMapping;
-use virtio_devices::{Endpoint, ActivateError};
+#[cfg(feature = "pci_support")]
+use virtio_devices::{AccessPlatformMapping, VdpaDmaMapping, VirtioMemMappingSource};
+use virtio_devices::{ActivateError, Endpoint};
+
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::dma_mapping::vfio::VfioDmaMapping;
 use vm_device::dma_mapping::ExternalDmaMapping;
@@ -1259,7 +1259,6 @@ impl DeviceManager {
         self.add_pci_devices(virtio_devices.clone())?;
         #[cfg(feature = "mmio_support")]
         self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
-        
 
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
@@ -1353,7 +1352,7 @@ impl DeviceManager {
         virtio_devices: Vec<MetaVirtioDevice>,
     ) -> DeviceManagerResult<()> {
         #[cfg(feature = "pci_support")]
-        {    
+        {
             let iommu_id = String::from(IOMMU_DEVICE_NAME);
 
             let iommu_device = if self.config.lock().unwrap().iommu {
@@ -1426,7 +1425,8 @@ impl DeviceManager {
                 }
 
                 if let Some(iommu_device) = iommu_device {
-                    let dev_id = self.add_virtio_pci_device(iommu_device, &None, iommu_id, 0, None)?;
+                    let dev_id =
+                        self.add_virtio_pci_device(iommu_device, &None, iommu_id, 0, None)?;
                     self.iommu_attached_devices = Some((dev_id, iommu_attached_devices));
                 }
             }
@@ -1453,12 +1453,8 @@ impl DeviceManager {
         virtio_devices: Vec<MetaVirtioDevice>,
         interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
     ) -> DeviceManagerResult<()> {
-        //#[cfg(feature = "mmio_support")]
-        {
-            for handle in virtio_devices {
-                info!("DDDDDD: add_mmio_devices");
-                self.add_virtio_mmio_device(handle.id, handle.virtio_device, interrupt_manager)?;
-            }
+        for handle in virtio_devices {
+            self.add_virtio_mmio_device(handle.id, handle.virtio_device, interrupt_manager)?;
         }
 
         Ok(())
@@ -1808,17 +1804,19 @@ impl DeviceManager {
         Ok(())
     }
     #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
-    pub fn enable_craton_uio_devices(
-        &mut self
-    ) -> DeviceManagerResult<()> {
+    pub fn enable_craton_uio_devices(&mut self) -> DeviceManagerResult<()> {
         /* connect eventfd and resample fd to kvm */
         for (eventfd, resamplefd, irq) in self.craton_uio_devices.iter() {
-            self.address_manager.vm.register_irqfd_with_resample(eventfd, resamplefd, *irq).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed registering irq_fd: {}", e),
-                )
-            }).unwrap();
+            self.address_manager
+                .vm
+                .register_irqfd_with_resample(eventfd, resamplefd, *irq)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed registering irq_fd: {}", e),
+                    )
+                })
+                .unwrap();
         }
         Ok(())
     }
@@ -1838,7 +1836,11 @@ impl DeviceManager {
             assert!(uio_dev_info.name.eq("rtc0"));
 
             /* open the device file for mapping and interrupt fds */
-            let dev_file = OpenOptions::new().read(true).write(true).open(&uio_dev_info.dev_path).unwrap();
+            let dev_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&uio_dev_info.dev_path)
+                .unwrap();
             info!("opened {}", uio_dev_info.name);
 
             /* interrupts */
@@ -1851,7 +1853,7 @@ impl DeviceManager {
             info!("Created eventfd and resamplefd");
 
             /* register eventfd and resample fd with uio driver */
-            use vmm_sys_util::ioctl::{ioctl_with_ref};
+            use vmm_sys_util::ioctl::ioctl_with_ref;
             use vmm_sys_util::{ioctl_expr, ioctl_ioc_nr, ioctl_iow_nr};
             #[repr(C, packed)]
             #[derive(Debug, Copy, Clone)]
@@ -1860,10 +1862,16 @@ impl DeviceManager {
                 fd: i32,
                 resamplefd: i32,
             }
-            ioctl_iow_nr!(UIO_AZURE_SPHERE_IRQFD_SET, 0xf8, 0x1, uio_azure_sphere_irqfd_set);
+            ioctl_iow_nr!(
+                UIO_AZURE_SPHERE_IRQFD_SET,
+                0xf8,
+                0x1,
+                uio_azure_sphere_irqfd_set
+            );
+
             let ioctl_in = uio_azure_sphere_irqfd_set {
-                irq_index:  0,
-                fd:         eventfd.as_raw_fd(),
+                irq_index: 0,
+                fd: eventfd.as_raw_fd(),
                 resamplefd: resamplefd.as_raw_fd(),
             };
             let ret = unsafe { ioctl_with_ref(&dev_file, UIO_AZURE_SPHERE_IRQFD_SET(), &ioctl_in) };
@@ -1918,7 +1926,7 @@ impl DeviceManager {
                     flags,
                     dev_file.as_raw_fd(), /* Note: after mapping we can safely close the file */
                     offset as libc::off_t,
-                    )
+                )
             };
 
             if mmap_addr == libc::MAP_FAILED {
@@ -1929,13 +1937,11 @@ impl DeviceManager {
 
             /* map into guest */
             let _slot = self
-                    .memory_manager
-                    .lock()
-                    .unwrap()
-                    .create_userspace_mapping(
-                        addr, len, mmap_addr as u64, false, false, false,
-                    )
-                    .map_err(DeviceManagerError::MemoryManager)?;
+                .memory_manager
+                .lock()
+                .unwrap()
+                .create_userspace_mapping(addr, len, mmap_addr as u64, false, false, false)
+                .map_err(DeviceManagerError::MemoryManager)?;
             /* dont need to update guest_ram_mapping in memory manager... */
 
             /* TODO need to put it into device tree...? */
@@ -1944,13 +1950,8 @@ impl DeviceManager {
              */
             self.id_to_dev_info.insert(
                 (DeviceType::Rtc, uio_dev_info.name.clone()),
-                MmioDeviceInfo {
-                    addr,
-                    len,
-                    irq,
-                },
+                MmioDeviceInfo { addr, len, irq },
             );
-
         }
 
         Ok(())
@@ -3792,7 +3793,6 @@ impl DeviceManager {
         virtio_device: Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
         interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
     ) -> DeviceManagerResult<()> {
-        info!("DDDDDDDDDDD: add_virtio_mmio_device {}", virtio_device_id);
         let id = format!("{}-{}", VIRTIO_MMIO_DEVICE_NAME_PREFIX, virtio_device_id);
 
         // Create the new virtio-mmio node that will be added later to the
@@ -3915,11 +3915,7 @@ impl DeviceManager {
             let io_addr = IoEventAddress::Mmio(*addr);
             self.address_manager
                 .vm
-                .register_ioevent(
-                    event,
-                    &io_addr,
-                    Some(DataMatch::DataMatch32(i as u32)),
-                )
+                .register_ioevent(event, &io_addr, Some(DataMatch::DataMatch32(i as u32)))
                 .map_err(|e| DeviceManagerError::RegisterIoevent(e.into()))?;
         }
 
@@ -3946,9 +3942,8 @@ impl DeviceManager {
         });
         node.resources.push(Resource::LegacyIrq(irq_num));
         node.migratable = Some(Arc::clone(&mmio_device_arc) as Arc<Mutex<dyn Migratable>>);
-        node.mmio_device_handle =  Some(Arc::clone(&mmio_device_arc));
+        node.mmio_device_handle = Some(Arc::clone(&mmio_device_arc));
         self.device_tree.lock().unwrap().insert(id, node);
-        info!("DDDDD: add_virtio_mmio_device done");
         Ok(())
     }
 
@@ -4080,9 +4075,7 @@ impl DeviceManager {
     }
 
     pub fn activate_virtio_devices(&self) -> DeviceManagerResult<()> {
-        info!("DDDDDDDDDDDDDDDDDDD: mmio activate_virtio_devices   ffff");
         for mut activator in self.pending_activations.lock().unwrap().drain(..) {
-            info!("DDDDDDDDDDDDDDDDDDD: mmio activate_virtio_devices   for loop");
             activator
                 .activate()
                 .map_err(DeviceManagerError::VirtioActivate)?;
@@ -4106,7 +4099,6 @@ impl DeviceManager {
         #[cfg(not(feature = "acpi"))]
         return Ok(());
     }
-
 
     #[cfg(feature = "pci_support")]
     pub fn add_device(
@@ -4620,12 +4612,12 @@ impl DeviceManager {
         {
             // Trigger a GPIO pin 3 event to satisify use case 2.
             self.gpio_device
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .trigger_key(3)
-            .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .trigger_key(3)
+                .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
             // Trigger a GED power button event to satisify use case 2.
             return self
                 .ged_notification_device
@@ -4759,30 +4751,30 @@ impl Aml for DeviceManager {
                 segment.append_aml_bytes(bytes);
             }
 
-        let mut mbrd_memory = Vec::new();
+            let mut mbrd_memory = Vec::new();
 
-        for segment in &self.pci_segments {
-            mbrd_memory.push(aml::Memory32Fixed::new(
-                true,
-                segment.mmio_config_address as u32,
-                layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT as u32,
-            ))
-        }
+            for segment in &self.pci_segments {
+                mbrd_memory.push(aml::Memory32Fixed::new(
+                    true,
+                    segment.mmio_config_address as u32,
+                    layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT as u32,
+                ))
+            }
 
-        let mut mbrd_memory_refs = Vec::new();
-        for mbrd_memory_ref in &mbrd_memory {
-            mbrd_memory_refs.push(mbrd_memory_ref as &dyn Aml);
-        }
+            let mut mbrd_memory_refs = Vec::new();
+            for mbrd_memory_ref in &mbrd_memory {
+                mbrd_memory_refs.push(mbrd_memory_ref as &dyn Aml);
+            }
 
-        aml::Device::new(
-            "_SB_.MBRD".into(),
-            vec![
-                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0C02")),
-                &aml::Name::new("_UID".into(), &aml::ZERO),
-                &aml::Name::new("_CRS".into(), &aml::ResourceTemplate::new(mbrd_memory_refs)),
-            ],
-        )
-        .append_aml_bytes(bytes);
+            aml::Device::new(
+                "_SB_.MBRD".into(),
+                vec![
+                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0C02")),
+                    &aml::Name::new("_UID".into(), &aml::ZERO),
+                    &aml::Name::new("_CRS".into(), &aml::ResourceTemplate::new(mbrd_memory_refs)),
+                ],
+            )
+            .append_aml_bytes(bytes);
 
             let mut mbrd_memory_refs = Vec::new();
             for mbrd_memory_ref in &mbrd_memory {

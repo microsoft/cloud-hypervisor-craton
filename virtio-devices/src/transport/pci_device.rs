@@ -7,6 +7,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
 use super::VirtioPciCommonConfig;
+use crate::transport::{Error, QueueState, VirtioTransport};
 use crate::GuestMemoryMmap;
 use crate::{
     ActivateResult, VirtioDevice, VirtioDeviceType, VirtioInterrupt, VirtioInterruptType,
@@ -28,7 +29,6 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
-use crate::transport::{Error, QueueState, VirtioTransport};
 use virtio_queue::{Error as QueueError, Queue};
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::dma_mapping::ExternalDmaMapping;

@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
 use std::fs;
-use std::fs::{File, OpenOptions, Metadata};
-use std::io::Read;
+use std::fs::{File, Metadata, OpenOptions};
 use std::io;
+use std::io::Read;
 use std::path::PathBuf;
 use std::result;
 use std::str;
@@ -145,7 +145,6 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
 }
 
 pub fn fdt_file_to_vec(file: &mut File) -> io::Result<Vec<u8>> {
-
     let metadata = file.metadata()?;
     let mut buffer = vec![0; metadata.len() as usize];
     file.read_exact(&mut buffer)?;
@@ -429,7 +428,7 @@ fn create_virtio_mmio_node<T: DeviceInfoForFdt + Clone + Debug>(
     let irq = [
         GIC_FDT_IRQ_TYPE_SPI,
         dev_info.irq() - IRQ_BASE,
-        IRQ_TYPE_EDGE_RISING
+        IRQ_TYPE_EDGE_RISING,
     ];
 
     let virtio_node = fdt.begin_node(&format!("virtio_mmio@{:x}", dev_info.addr()))?;

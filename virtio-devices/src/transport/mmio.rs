@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
-use vm_virtio::{AccessPlatform, Translatable};
 use virtio_queue::Queue;
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
@@ -25,6 +24,7 @@ use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
 };
+use vm_virtio::{AccessPlatform, Translatable};
 use vmm_sys_util::{errno::Result, eventfd::EventFd};
 
 const VENDOR_ID: u32 = 0;
@@ -55,7 +55,6 @@ impl VirtioInterruptIntx {
 
 impl VirtioInterrupt for VirtioInterruptIntx {
     fn trigger(&self, int_type: VirtioInterruptType) -> std::result::Result<(), std::io::Error> {
-        info!("DDDDDDDDDDDDDDDDDDD: mmio trigger");
         let status = match int_type {
             VirtioInterruptType::Config => INTERRUPT_STATUS_CONFIG_CHANGED,
             VirtioInterruptType::Queue(queue_index) => INTERRUPT_STATUS_USED_RING,
@@ -94,7 +93,6 @@ pub struct VirtioMmioDeviceActivator {
 
 impl VirtioMmioDeviceActivator {
     pub fn activate(&mut self) -> ActivateResult {
-        info!("DDDDDDDDDDDDDDDDDDD: mmio activate");
         self.device.lock().unwrap().activate(
             self.memory.take().unwrap(),
             self.interrupt.take().unwrap(),
@@ -112,7 +110,6 @@ impl VirtioMmioDeviceActivator {
         Ok(())
     }
 }
-
 
 /// Implements the
 /// [MMIO](http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-1090002)
@@ -162,7 +159,6 @@ impl VirtioMmioDevice {
         activate_evt: EventFd,
         pending_activations: Arc<Mutex<Vec<VirtioMmioDeviceActivator>>>,
     ) -> Result<VirtioMmioDevice> {
-        info!("DDDDDDDDDDDDDDDDDDD: mmio new");
         let device_clone = device.clone();
         let locked_device = device_clone.lock().unwrap();
         let mut queue_evts = Vec::new();
@@ -276,15 +272,12 @@ impl VirtioMmioDevice {
     }
 
     fn is_driver_ready(&self) -> bool {
-        //info!("DDDDD: mmio is_driver_ready");
         let ready_bits = DEVICE_ACKNOWLEDGE | DEVICE_DRIVER | DEVICE_DRIVER_OK | DEVICE_FEATURES_OK;
-        info!("DDDD mmio {} Ready bits: {:#018b}, driver status: {:#018b}, Failed: {:#018b}", self.id, ready_bits, self.driver_status, DEVICE_FAILED);
         self.driver_status == ready_bits && self.driver_status & DEVICE_FAILED == 0
     }
 
     /// Determines if the driver has requested the device (re)init / reset itself
     fn is_driver_init(&self) -> bool {
-        //info!("DDDDD: mmio is_driver_init");
         self.driver_status == DEVICE_INIT
     }
 
@@ -306,14 +299,12 @@ impl VirtioMmioDevice {
     }
 
     pub fn assign_interrupt(&mut self, interrupt: Arc<dyn InterruptSourceGroup>) {
-        info!("DDDDD: mmio assign_interrupt");
         self.virtio_interrupt = Some(Arc::new(VirtioInterruptIntx::new(
             self.interrupt_status.clone(),
             interrupt,
         )));
     }
     fn prepare_activator(&mut self, barrier: Option<Arc<Barrier>>) -> VirtioMmioDeviceActivator {
-        info!("DDDDDDDDDDDDDDDDDDD: mmio prepare_activator");
         let mut queue_evts = Vec::new();
         let mut queues: Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>> =
             self.queues.iter().map(vm_virtio::clone_queue).collect();
@@ -343,30 +334,9 @@ impl VirtioMmioDevice {
     }
 
     fn activate(&mut self) -> ActivateResult {
-        info!("DDDDDDDDDDDDDDDDDDD: mmio Activate");
         self.prepare_activator(None).activate()
     }
-    /*
-    fn activate(&mut self) -> ActivateResult {
-        if let Some(virtio_interrupt) = self.virtio_interrupt.take() {
-            if self.memory.is_some() {
-                let mem = self.memory.as_ref().unwrap().clone();
-                let mut device = self.device.lock().unwrap();
-                let mut queue_evts = Vec::new();
-                let mut queues: Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>> =
-                    self.queues.iter().map(vm_virtio::clone_queue).collect();
-                queues.retain(|q| q.state.ready);
-                for (i, queue) in queues.iter().enumerate() {
-                    queue_evts.push(self.queue_evts[i].try_clone().unwrap());
-                    if !queue.is_valid() {
-                        error!("Queue {} is not valid", i);
-                    }
-                }
-                return device.activate(mem, virtio_interrupt, queues, queue_evts);
-            }
-        }
-        Ok(())
-    }*/
+
     pub fn maybe_activate(&mut self) {
         if self.needs_activation() {
             self.activate().expect("Failed to activate device");
@@ -380,11 +350,7 @@ impl VirtioMmioDevice {
     }
 
     fn needs_activation(&self) -> bool {
-        info!("DDDDD: mmio {} needs_activation", self.id);
-        let activated = self.device_activated.load(Ordering::SeqCst);
-        let ready = self.is_driver_ready();
-        info!("DDDDD {} needs_activation: activated {:?}, ready : {:?}", self.id, activated, ready);
-        !activated && ready
+        !self.device_activated.load(Ordering::SeqCst) && self.is_driver_ready()
     }
 }
 
@@ -400,7 +366,6 @@ impl VirtioTransport for VirtioMmioDevice {
 
 impl BusDevice for VirtioMmioDevice {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-        //info!("DDDDD: mmio read");
         match offset {
             0x00..=0xff if data.len() == 4 => {
                 let v = match offset {
@@ -510,7 +475,7 @@ impl BusDevice for VirtioMmioDevice {
                         self.interrupt_status
                             .fetch_and(!(v as usize), Ordering::SeqCst);
                     }
-                    0x70 => {println!("mmio write : set device status : {:X}", v);self.driver_status = v},
+                    0x70 => self.driver_status = v,
                     0x80 => self.with_queue_mut(|q| lo(&mut q.state.desc_table, v)),
                     0x84 => self.with_queue_mut(|q| hi(&mut q.state.desc_table, v)),
                     0x90 => self.with_queue_mut(|q| lo(&mut q.state.avail_ring, v)),
@@ -540,7 +505,6 @@ impl BusDevice for VirtioMmioDevice {
 
         // Try and activate the device if the driver status has changed
         if self.needs_activation() {
-            info!("DDDDDDDDDDDDDDDDDDD: mmio if self.needs_activation()");
             let barrier = Arc::new(Barrier::new(2));
             let activator = self.prepare_activator(Some(barrier.clone()));
             self.pending_activations.lock().unwrap().push(activator);
@@ -555,7 +519,6 @@ impl BusDevice for VirtioMmioDevice {
 
         // Device has been reset by the driver
         if self.device_activated.load(Ordering::SeqCst) && self.is_driver_init() {
-            info!("DDDDDDDDDDDDDDDDDDD: mmio if self.device_activated.load(Ordering::SeqCst) && self.is_driver_init()");
             let mut device = self.device.lock().unwrap();
             if let Some(virtio_interrupt) = device.reset() {
                 // Upon reset the device returns its interrupt EventFD

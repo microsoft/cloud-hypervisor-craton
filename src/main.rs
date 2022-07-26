@@ -418,13 +418,11 @@ fn create_app<'a>(
     let app = app.arg(
         Arg::with_name("dtb")
             .long("dtb")
-            .help(
-                "Path to device tree file.",
-            )
+            .help("Path to device tree file.")
             .takes_value(true)
             .group("vm-config"),
     );
-    
+
     app
 }
 

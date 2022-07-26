@@ -115,7 +115,6 @@ pub const ACPI_START: GuestAddress = GuestAddress(RAM_START.0 + FDT_MAX_SIZE);
 pub const ACPI_MAX_SIZE: u64 = 0x20_0000;
 pub const RSDP_POINTER: GuestAddress = ACPI_START;
 
-
 /// Kernel start after FDT and ACPI
 pub const KERNEL_START: GuestAddress = GuestAddress(ACPI_START.0 + ACPI_MAX_SIZE);
 

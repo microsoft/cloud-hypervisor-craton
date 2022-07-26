@@ -222,11 +222,11 @@ pub fn set_fdt_addr(addr: u64) {
 
 /// Returns the memory address where the kernel could be loaded.
 pub fn get_kernel_start() -> GuestAddress {
-    unsafe {KERNEL_START}
+    unsafe { KERNEL_START }
 }
 
 pub fn get_ram_start() -> GuestAddress {
-    unsafe {RAM_64BIT_START}
+    unsafe { RAM_64BIT_START }
 }
 
 ///Return guest memory address where the uefi should be loaded.
@@ -236,7 +236,7 @@ pub fn get_uefi_start() -> GuestAddress {
 
 // Auxiliary function to get the address where the device tree blob is loaded.
 fn get_fdt_addr() -> GuestAddress {
-    unsafe{FDT_START}
+    unsafe { FDT_START }
 }
 
 pub fn get_host_cpu_phys_bits() -> u8 {
