@@ -71,6 +71,8 @@ use vm_memory::{Bytes, GuestAddressSpace};
 #[cfg(feature = "acpi")]
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemoryAtomic;
+#[cfg(feature = "gdb")]
+use vm_memory::{Bytes, GuestAddressSpace};
 
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,

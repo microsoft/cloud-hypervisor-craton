@@ -1,13 +1,13 @@
 // ???
-// 
+//
 //
 
 use std::fs::{File, OpenOptions};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::{io, result};
-use std::path::{Path, PathBuf};
-//use std::string::*;
+
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
 
@@ -34,7 +34,7 @@ fn open_and_parse_hex(path: String) -> u64 {
     u64::from_str_radix(just_num, 16).unwrap()
 }
 
-pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>>{
+pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>> {
     let mut ret = vec![];
     let mut dev_num: u32 = 0;
     info!("UIO devices:");
@@ -49,7 +49,7 @@ pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>>{
             },
         };
         /* The device exists, now populate it */
-        let mut dev_info = UioDeviceInfo{
+        let mut dev_info = UioDeviceInfo {
             name: String::new(),
             dev_path: PathBuf::from(dev_path),
             dev_num,
@@ -77,7 +77,7 @@ pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>>{
             let size = open_and_parse_hex(format!("{}/size", map_path));
             let offset = open_and_parse_hex(format!("{}/offset", map_path));
             info!("   ({:#x}, {:#x}, {:#x})", addr, size, offset);
-            dev_info.mappings.push((addr,size,offset));
+            dev_info.mappings.push((addr, size, offset));
 
             map_num += 1;
         }
@@ -90,22 +90,22 @@ pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>>{
         let interrupts_path = format!("{}/device/of_node/interrupts", sys_path);
         if Path::new(&interrupts_path).exists() {
             let bytes: Vec<u8> = std::fs::read(&interrupts_path).unwrap();
-            if bytes.len() % (4*3) == 0 {
-                let num_interrupts: usize = bytes.len() / (4*3);
+            if bytes.len() % (4 * 3) == 0 {
+                let num_interrupts: usize = bytes.len() / (4 * 3);
                 for n in 0..num_interrupts {
                     /* we only care about the middle number of the 3; that's the interrupt */
                     let i = (n * 3 + 1) * 4;
-                    let slice = [
-                        bytes[i + 0],
-                        bytes[i + 1],
-                        bytes[i + 2],
-                        bytes[i + 3]];
-                        let interrupt: u32 = u32::from_be_bytes(slice);
-                        info!("   {:#x}", interrupt);
-                        dev_info.interrupts.push(interrupt);
+                    let slice = [bytes[i + 0], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+                    let interrupt: u32 = u32::from_be_bytes(slice);
+                    info!("   {:#x}", interrupt);
+                    dev_info.interrupts.push(interrupt);
                 }
             } else {
-                info!("   invalid number of bytes {} in {}", bytes.len(), interrupts_path);
+                info!(
+                    "   invalid number of bytes {} in {}",
+                    bytes.len(),
+                    interrupts_path
+                );
             }
         }
         ret.push(dev_info);
@@ -114,18 +114,16 @@ pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>>{
     return Ok(ret);
 }
 
-pub struct Uio {
-}
+pub struct Uio {}
 
 impl Uio {
     pub fn new() -> Self {
-        Self { }
+        Self {}
     }
 }
 
 impl BusDevice for Uio {
-    fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-    }
+    fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {}
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
         None
     }

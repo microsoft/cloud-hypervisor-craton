@@ -818,8 +818,7 @@ impl Mem {
         region: &Arc<GuestRegionMmap>,
         resize: ResizeSender,
         seccomp_action: SeccompAction,
-        #[cfg(feature = "pci_support")]
-        numa_node_id: Option<u16>,
+        #[cfg(feature = "pci_support")] numa_node_id: Option<u16>,
         initial_size: u64,
         hugepages: bool,
         exit_evt: EventFd,

@@ -1600,7 +1600,6 @@ impl Vmm {
                         self.vm_reboot().map_err(Error::VmReboot)?;
                     }
                     EpollDispatch::ActivateVirtioDevices => {
-                        info!("DDDDDDDD EpollDispatch::ActivateVirtioDevices ");
                         if let Some(ref vm) = self.vm {
                             let count = self.activate_evt.read().map_err(Error::EventFdRead)?;
                             info!(
