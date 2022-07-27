@@ -1191,7 +1191,7 @@ impl MemoryManager {
                 start_of_platform_device_area,
                 PLATFORM_DEVICE_AREA_SIZE,
                 layout::MEM_32BIT_DEVICES_START,
-                layout::MEM_32BIT_DEVICES_SIZE,
+                ram_start.unchecked_sub(layout::MEM_32BIT_DEVICES_START.0).0,
             )
             .ok_or(Error::CreateSystemAllocator)?,
         ));

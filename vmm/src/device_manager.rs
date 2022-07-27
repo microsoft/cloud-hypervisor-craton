@@ -3823,7 +3823,7 @@ impl DeviceManager {
                 .allocator
                 .lock()
                 .unwrap()
-                .allocate_platform_mmio_addresses(Some(GuestAddress(base)), size, Some(size))
+                .allocate_platform_or_mmio_hole_addresses(Some(GuestAddress(base)), size, Some(size))
                 .ok_or(DeviceManagerError::MmioRangeAllocation)?;
 
             (base, size)
