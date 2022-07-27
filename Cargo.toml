@@ -55,7 +55,7 @@ wait-timeout = "0.2.0"
 [features]
 default = ["common", "kvm", "pci", "acpi"]
 # Common features for all hypervisors
-common = ["acpi", "fwdebug"]
+common = ["acpi", "fwdebug", "pci"]
 acpi = ["vmm/acpi"]
 amx = ["vmm/amx"]
 cmos = ["vmm/cmos"]

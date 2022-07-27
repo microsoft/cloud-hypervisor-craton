@@ -2194,7 +2194,7 @@ impl Vm {
                 }
                 TdvfSectionType::PayloadParam => {
                     info!("Copying payload parameters to guest memory");
-                    let cmdline = Self::generate_cmdline(&self.config)?;
+                    let cmdline = Self::generate_cmdline(&self.config, &self.device_manager)?;
                     mem.write_slice(cmdline.as_str().as_bytes(), GuestAddress(section.address))
                         .unwrap();
                 }

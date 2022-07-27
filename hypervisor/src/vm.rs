@@ -274,6 +274,7 @@ pub trait Vm: Send + Sync {
     fn create_irq_chip(&self) -> Result<()>;
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
+    #[cfg(feature = "kvm")]
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     fn register_irqfd_with_resample(
         &self,

@@ -3339,6 +3339,7 @@ mod tests {
             #[cfg(feature = "gdb")]
             gdb: false,
             platform: None,
+            #[cfg(target_arch = "aarch64")]
             dtb: None,
         };
 
