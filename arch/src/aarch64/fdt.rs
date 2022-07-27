@@ -99,6 +99,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     gic_device: &Arc<Mutex<dyn Vgic>>,
     initrd: &Option<InitramfsConfig>,
     pci_space_info: &[PciSpaceInfo],
+    #[cfg(feature = "pci_support")]
     numa_nodes: &NumaNodes,
     virtio_iommu_bdf: Option<u32>,
     pmu_supported: bool,
@@ -120,8 +121,8 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     // This is not mandatory but we use it to point the root node to the node
     // containing description of the interrupt controller for this VM.
     fdt.property_u32("interrupt-parent", GIC_PHANDLE)?;
-    create_cpu_nodes(&mut fdt, &vcpu_mpidr, vcpu_topology, numa_nodes)?;
-    create_memory_node(&mut fdt, guest_mem, numa_nodes)?;
+    create_cpu_nodes(&mut fdt, &vcpu_mpidr, vcpu_topology,  #[cfg(feature = "pci_support")] numa_nodes)?;
+    create_memory_node(&mut fdt, guest_mem,  #[cfg(feature = "pci_support")] numa_nodes)?;
     create_chosen_node(&mut fdt, cmdline, initrd)?;
     create_gic_node(&mut fdt, gic_device)?;
     create_timer_node(&mut fdt)?;
@@ -132,6 +133,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     create_psci_node(&mut fdt)?;
     create_devices_node(&mut fdt, device_info)?;
     create_pci_nodes(&mut fdt, pci_space_info, virtio_iommu_bdf)?;
+    #[cfg(feature = "pci_support")]
     if numa_nodes.len() > 1 {
         create_distance_map_node(&mut fdt, numa_nodes)?;
     }
@@ -164,6 +166,7 @@ fn create_cpu_nodes(
     fdt: &mut FdtWriter,
     vcpu_mpidr: &[u64],
     vcpu_topology: Option<(u8, u8, u8)>,
+    #[cfg(feature = "pci_support")]
     numa_nodes: &NumaNodes,
 ) -> FdtWriterResult<()> {
     // See https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/arm/cpus.yaml.
@@ -186,7 +189,7 @@ fn create_cpu_nodes(
         // See http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0488c/BABHBJCI.html.
         fdt.property_u32("reg", (mpidr & 0x7FFFFF) as u32)?;
         fdt.property_u32("phandle", cpu_id as u32 + FIRST_VCPU_PHANDLE)?;
-
+        #[cfg(feature = "pci_support")]
         // Add `numa-node-id` property if there is any numa config.
         if numa_nodes.len() > 1 {
             for numa_node_idx in 0..numa_nodes.len() {
@@ -240,10 +243,12 @@ fn create_cpu_nodes(
 fn create_memory_node(
     fdt: &mut FdtWriter,
     guest_mem: &GuestMemoryMmap,
+    #[cfg(feature = "pci_support")]
     numa_nodes: &NumaNodes,
 ) -> FdtWriterResult<()> {
     // See https://github.com/torvalds/linux/blob/58ae0b51506802713aa0e9956d1853ba4c722c98/Documentation/devicetree/bindings/numa.txt
     // for NUMA setting in memory node.
+    #[cfg(feature = "pci_support")]
     if numa_nodes.len() > 1 {
         for numa_node_idx in 0..numa_nodes.len() {
             let numa_node = numa_nodes.get(&(numa_node_idx as u32));

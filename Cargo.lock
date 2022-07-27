@@ -160,6 +160,7 @@ version = "25.0.0"
 dependencies = [
  "anyhow",
  "api_client",
+ "arch",
  "clap",
  "devices",
  "dirs",

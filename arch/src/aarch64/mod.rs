@@ -146,6 +146,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
     pci_space_info: &[PciSpaceInfo],
     virtio_iommu_bdf: Option<u32>,
     gic_device: &Arc<Mutex<dyn Vgic>>,
+    #[cfg(feature = "acpi")]
     numa_nodes: &NumaNodes,
     dtb_path: Option<File>,
     pmu_supported: bool,
@@ -162,6 +163,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
             gic_device,
             initrd,
             pci_space_info,
+            #[cfg(feature = "pci_support")]
             numa_nodes,
             virtio_iommu_bdf,
             pmu_supported,
@@ -172,7 +174,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
         fdt::print_fdt(&fdt_final);
     }
 
-    fdt::write_fdt_to_memory(fdt_final, guest_mem).map_err(Error::WriteFdtToMemory)?;
+    fdt::write_fdt_to_memory(fdt_final.to_vec(), guest_mem).map_err(Error::WriteFdtToMemory)?;
 
     Ok(())
 }

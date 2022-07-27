@@ -17,6 +17,7 @@ lto = true
 
 [dependencies]
 anyhow = "1.0.58"
+arch = { path = "arch" }
 api_client = { path = "api_client" }
 clap = { version = "3.2.8", features = ["wrap_help","cargo"] }
 devices = { path = "devices" }
@@ -52,7 +53,7 @@ test_infra = { path = "test_infra" }
 wait-timeout = "0.2.0"
 
 [features]
-default = ["common", "kvm", "pci"]
+default = ["common", "kvm", "pci", "acpi"]
 # Common features for all hypervisors
 common = ["acpi", "fwdebug"]
 acpi = ["vmm/acpi"]
