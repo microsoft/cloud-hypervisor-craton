@@ -11,7 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         rust:
-          - stable
+          - 1.59
         target:
           - aarch64-unknown-linux-gnu
         experimental: [false]

@@ -9,7 +9,7 @@ jobs:
     strategy:
       matrix:
         rust:
-          - nightly
+          - "1.59"
         target:
           - x86_64-unknown-linux-gnu
     steps:
