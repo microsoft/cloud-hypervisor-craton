@@ -1257,8 +1257,10 @@ impl DeviceManager {
 
         #[cfg(feature = "pci_support")]
         self.add_pci_devices(virtio_devices.clone())?;
-        #[cfg(feature = "mmio_support")]
+        
+        #[cfg(not(feature = "pci_support"))]
         self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
+        
 
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
@@ -1299,11 +1301,11 @@ impl DeviceManager {
 
         virtio_devices.append(&mut self.make_virtio_devices()?);
 
-        if cfg!(feature = "pci_support") {
-            self.add_pci_devices(virtio_devices.clone())?;
-        } else if cfg!(feature = "mmio_support") {
-            self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
-        }
+        #[cfg(feature = "pci_support")]
+        self.add_pci_devices(virtio_devices.clone())?;
+        #[cfg(not(feature = "pci_support"))]
+        self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
+        
 
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
@@ -4581,8 +4583,8 @@ impl DeviceManager {
 
         Ok(())
     }
-    #[cfg(feature = "acpi")]
-    #[cfg(target_arch = "x86_64")]
+
+    #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
     pub fn notify_power_button(&self) -> DeviceManagerResult<()> {
         self.ged_notification_device
             .as_ref()
@@ -4601,13 +4603,14 @@ impl DeviceManager {
 
         // Trigger a GPIO pin 3 event to satisify use case 1.
         #[cfg(not(feature = "acpi"))]
-        self.gpio_device
+        return self.gpio_device
             .as_ref()
             .unwrap()
             .lock()
             .unwrap()
             .trigger_key(3)
-            .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
+            .map_err(DeviceManagerError::AArch64PowerButtonNotification);
+
         #[cfg(feature = "acpi")]
         {
             // Trigger a GPIO pin 3 event to satisify use case 2.
