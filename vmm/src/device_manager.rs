@@ -1290,7 +1290,10 @@ impl DeviceManager {
                 base: *mmio_base,
                 size: 0x200,
             });
-            node.resources.push(Resource::LegacyIrq(*irq_num));
+            /* Nuno: add IRQ_BASE, because what goes in the device tree is irq - IRQ_BASE...
+             * TODO: really we should add it in add_virtio_mmio_device but its here for now
+             */
+            node.resources.push(Resource::LegacyIrq(*irq_num + arch::IRQ_BASE));
             self.device_tree.lock().unwrap().insert(id, node);
         }
 
