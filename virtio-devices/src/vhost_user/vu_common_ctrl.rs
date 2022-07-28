@@ -173,7 +173,7 @@ impl VhostUserHandle {
         // at early stage.
         for (queue_index, queue) in queues.iter().enumerate() {
             self.vu
-                .set_vring_num(queue_index, queue.actual_size())
+                .set_vring_num(queue_index, queue.state.size)
                 .map_err(Error::VhostUserSetVringNum)?;
         }
 
@@ -184,7 +184,7 @@ impl VhostUserHandle {
                     mmap_size: 0,
                     mmap_offset: 0,
                     num_queues: queues.len() as u16,
-                    queue_size: queues[0].actual_size(),
+                    queue_size: queues[0].state.size,
                 };
                 let (info, fd) = self
                     .vu
@@ -203,11 +203,11 @@ impl VhostUserHandle {
 
         let mut vrings_info = Vec::new();
         for (queue_index, queue) in queues.into_iter().enumerate() {
-            let actual_size: usize = queue.actual_size().try_into().unwrap();
+            let actual_size: usize = queue.state.size.try_into().unwrap();
 
             let config_data = VringConfigData {
                 queue_max_size: queue.max_size(),
-                queue_size: queue.actual_size(),
+                queue_size: queue.state.size,
                 flags: 0u32,
                 desc_table_addr: get_host_address_range(
                     mem,
@@ -253,7 +253,7 @@ impl VhostUserHandle {
                 .map_err(Error::VhostUserSetVringBase)?;
 
             if let Some(eventfd) =
-                virtio_interrupt.notifier(&VirtioInterruptType::Queue, Some(&queue))
+                virtio_interrupt.notifier(VirtioInterruptType::Queue(queue_index as u16))
             {
                 self.vu
                     .set_vring_call(queue_index, &eventfd)
@@ -290,10 +290,7 @@ impl VhostUserHandle {
     }
 
     pub fn reset_vhost_user(&mut self, num_queues: usize) -> Result<()> {
-        self.enable_vhost_user_vrings(num_queues, false)?;
-
-        // Reset the owner.
-        self.vu.reset_owner().map_err(Error::VhostUserResetOwner)
+        self.enable_vhost_user_vrings(num_queues, false)
     }
 
     pub fn set_protocol_features_vhost_user(

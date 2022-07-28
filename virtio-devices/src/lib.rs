@@ -10,13 +10,14 @@
 
 //! Implements virtio devices, queues, and transport mechanisms.
 
+//#![allow(clippy::significant_drop_in_scrutinee)]
+
 #[macro_use]
 extern crate event_monitor;
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
 
+use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::io;
 
@@ -34,6 +35,7 @@ mod rng;
 pub mod seccomp_filters;
 mod thread_helper;
 pub mod transport;
+pub mod vdpa;
 pub mod vhost_user;
 pub mod vsock;
 pub mod watchdog;
@@ -48,6 +50,7 @@ pub use self::mem::*;
 pub use self::net::*;
 pub use self::pmem::*;
 pub use self::rng::*;
+pub use self::vdpa::*;
 pub use self::vsock::*;
 pub use self::watchdog::*;
 use vm_memory::{bitmap::AtomicBitmap, GuestAddress, GuestMemory};
@@ -100,6 +103,8 @@ pub enum ActivateError {
     CreateSeccompFilter(seccompiler::Error),
     /// Cannot create rate limiter
     CreateRateLimiter(std::io::Error),
+    /// Failed activating the vDPA device
+    ActivateVdpa(vdpa::Error),
 }
 
 pub type ActivateResult = std::result::Result<(), ActivateError>;
@@ -110,6 +115,7 @@ pub type DeviceEventT = u16;
 pub enum Error {
     FailedSignalingUsedQueue(io::Error),
     IoError(io::Error),
+    VdpaUpdateMemory(vdpa::Error),
     VhostUserUpdateMemory(vhost_user::Error),
     VhostUserAddMemoryRegion(vhost_user::Error),
     SetShmRegionsNotSupported,
@@ -119,14 +125,14 @@ pub enum Error {
     QueueIterator(virtio_queue::Error),
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TokenBucketConfig {
     pub size: u64,
     pub one_time_burst: Option<u64>,
     pub refill_time: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimiterConfig {
     pub bandwidth: Option<TokenBucketConfig>,
