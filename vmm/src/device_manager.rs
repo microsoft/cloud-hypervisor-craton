@@ -3903,7 +3903,7 @@ impl DeviceManager {
             .push(Arc::clone(&mmio_device_arc) as Arc<Mutex<dyn BusDevice>>);
         self.address_manager
             .mmio_bus
-            .insert(mmio_device_arc.clone(), mmio_base, MMIO_LEN)
+            .insert(mmio_device_arc.clone(), mmio_base, mmio_size)
             .map_err(DeviceManagerError::BusError)?;
 
         #[cfg(target_arch = "x86_64")]
