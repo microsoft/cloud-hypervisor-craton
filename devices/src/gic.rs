@@ -17,7 +17,7 @@ type Result<T> = result::Result<T, Error>;
 
 // Reserve 32 IRQs for legacy device.
 pub const IRQ_LEGACY_BASE: usize = arch::layout::IRQ_BASE as usize;
-pub const IRQ_LEGACY_COUNT: usize = 32;
+pub const IRQ_LEGACY_COUNT: usize = 128;
 
 // This Gic struct implements InterruptController to provide interrupt delivery service.
 // The Gic source files in arch/ folder maintain the Aarch64 specific Gic device.
