@@ -6,18 +6,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use crate::{NumaNodes, PciSpaceInfo};
+#[cfg(feature = "acpi")]
+use crate::NumaNodes;
+use crate::PciSpaceInfo;
 use byteorder::{BigEndian, ByteOrder};
 use hypervisor::arch::aarch64::gic::Vgic;
 use std::cmp;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt::Debug;
-use std::fs;
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::io::Read;
-use std::path::PathBuf;
 use std::result;
 use std::str;
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,7 @@ use super::layout::{
     PCI_HIGH_BASE, PCI_MMIO_CONFIG_SIZE_PER_SEGMENT,
 };
 use vm_fdt::{FdtWriter, FdtWriterResult};
-use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError, GuestMemoryRegion};
+use vm_memory::{Address, Bytes, GuestMemory, GuestMemoryError};
 
 // This is a value for uniquely identifying the FDT node declaring the interrupt controller.
 const GIC_PHANDLE: u32 = 1;
@@ -89,6 +89,7 @@ pub enum Error {
 type Result<T> = result::Result<T, Error>;
 
 /// Creates the flattened device tree for this aarch64 VM.
+#[allow(unused_variables)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHasher>(
     guest_mem: &GuestMemoryMmap,
@@ -99,8 +100,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     gic_device: &Arc<Mutex<dyn Vgic>>,
     initrd: &Option<InitramfsConfig>,
     pci_space_info: &[PciSpaceInfo],
-    #[cfg(feature = "pci_support")]
-    numa_nodes: &NumaNodes,
+    #[cfg(feature = "acpi")] numa_nodes: &NumaNodes,
     virtio_iommu_bdf: Option<u32>,
     pmu_supported: bool,
 ) -> FdtWriterResult<Vec<u8>> {
@@ -121,8 +121,27 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     // This is not mandatory but we use it to point the root node to the node
     // containing description of the interrupt controller for this VM.
     fdt.property_u32("interrupt-parent", GIC_PHANDLE)?;
-    create_cpu_nodes(&mut fdt, &vcpu_mpidr, vcpu_topology,  #[cfg(feature = "pci_support")] numa_nodes)?;
-    create_memory_node(&mut fdt, guest_mem,  #[cfg(feature = "pci_support")] numa_nodes)?;
+    create_cpu_nodes(
+        &mut fdt,
+        &vcpu_mpidr,
+        vcpu_topology,
+        #[cfg(feature = "acpi_support")]
+        numa_nodes,
+    )?;
+    create_cpu_nodes(
+        &mut fdt,
+        &vcpu_mpidr,
+        vcpu_topology,
+        #[cfg(feature = "acpi_support")]
+        numa_nodes,
+    )?;
+    create_memory_node(
+        &mut fdt,
+        guest_mem,
+        #[cfg(feature = "acpi_support")]
+        numa_nodes,
+    )?;
+
     create_chosen_node(&mut fdt, cmdline, initrd)?;
     create_gic_node(&mut fdt, gic_device)?;
     create_timer_node(&mut fdt)?;
@@ -133,7 +152,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::BuildHash
     create_psci_node(&mut fdt)?;
     create_devices_node(&mut fdt, device_info)?;
     create_pci_nodes(&mut fdt, pci_space_info, virtio_iommu_bdf)?;
-    #[cfg(feature = "pci_support")]
+    #[cfg(feature = "acpi_support")]
     if numa_nodes.len() > 1 {
         create_distance_map_node(&mut fdt, numa_nodes)?;
     }
@@ -166,8 +185,7 @@ fn create_cpu_nodes(
     fdt: &mut FdtWriter,
     vcpu_mpidr: &[u64],
     vcpu_topology: Option<(u8, u8, u8)>,
-    #[cfg(feature = "pci_support")]
-    numa_nodes: &NumaNodes,
+    #[cfg(feature = "pci_support")] numa_nodes: &NumaNodes,
 ) -> FdtWriterResult<()> {
     // See https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/arm/cpus.yaml.
     let cpus_node = fdt.begin_node("cpus")?;
@@ -243,13 +261,16 @@ fn create_cpu_nodes(
 fn create_memory_node(
     fdt: &mut FdtWriter,
     guest_mem: &GuestMemoryMmap,
-    #[cfg(feature = "pci_support")]
-    numa_nodes: &NumaNodes,
+    #[cfg(feature = "acpi_support")] numa_nodes: &NumaNodes,
 ) -> FdtWriterResult<()> {
     // See https://github.com/torvalds/linux/blob/58ae0b51506802713aa0e9956d1853ba4c722c98/Documentation/devicetree/bindings/numa.txt
     // for NUMA setting in memory node.
-    #[cfg(feature = "pci_support")]
-    if numa_nodes.len() > 1 {
+    #[cfg(feature = "acpi_support")]
+    let num_numa_node = numa_nodes.len();
+    #[cfg(not(feature = "acpi_support"))]
+    let num_numa_node = 0;
+    if num_numa_node > 1 {
+        #[cfg(feature = "acpi_support")]
         for numa_node_idx in 0..numa_nodes.len() {
             let numa_node = numa_nodes.get(&(numa_node_idx as u32));
             let mut mem_reg_prop: Vec<u64> = Vec::new();
@@ -724,6 +745,9 @@ fn create_pci_nodes(
     Ok(())
 }
 
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[cfg(feature = "acpi")]
 fn create_distance_map_node(fdt: &mut FdtWriter, numa_nodes: &NumaNodes) -> FdtWriterResult<()> {
     let distance_map_node = fdt.begin_node("distance-map")?;
     fdt.property_string("compatible", "numa-distance-map-v1")?;

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#![allow(clippy::significant_drop_in_scrutinee)]
+//#![allow(clippy::significant_drop_in_scrutinee)]
 
 #[macro_use]
 extern crate event_monitor;
@@ -28,6 +28,7 @@ use crate::vm::{Error as VmError, Vm, VmState};
 use anyhow::anyhow;
 use libc::EFD_NONBLOCK;
 use memory_manager::MemoryManagerSnapshotData;
+
 use pci::PciBdf;
 use seccompiler::{apply_filter, SeccompAction};
 use serde::ser::{SerializeStruct, Serializer};
@@ -1958,6 +1959,10 @@ mod unit_tests {
             #[cfg(feature = "gdb")]
             gdb: false,
             platform: None,
+            #[cfg(target_arch = "aarch64")]
+            craton: false,
+            #[cfg(target_arch = "aarch64")]
+            dtb: None,
         }))
     }
 

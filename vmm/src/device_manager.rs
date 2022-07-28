@@ -10,9 +10,11 @@
 //
 
 use crate::config::{
-    ConsoleOutputMode, DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig,
-    VdpaConfig, VhostMode, VmConfig, VsockConfig,
+    ConsoleOutputMode, DiskConfig, FsConfig, NetConfig, PmemConfig, VhostMode, VmConfig,
+    VsockConfig,
 };
+#[cfg(feature = "pci_support")]
+use crate::config::{DeviceConfig, UserDeviceConfig, VdpaConfig};
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::LegacyUserspaceInterruptManager;
 use crate::interrupt::MsiInterruptManager;
@@ -59,11 +61,16 @@ use devices::legacy::Serial;
 use devices::{
     interrupt_controller, interrupt_controller::InterruptController, AcpiNotificationFlags,
 };
-use hypervisor::{DataMatch, DeviceFd, HypervisorVmError, IoEventAddress};
+#[cfg(feature = "mmio_support")]
+use hypervisor::DataMatch;
+#[cfg(feature = "pci_support")]
+use hypervisor::DeviceFd;
+use hypervisor::{HypervisorVmError, IoEventAddress};
 use libc::{
     cfmakeraw, isatty, tcgetattr, tcsetattr, termios, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED,
     O_TMPFILE, PROT_READ, PROT_WRITE, TCSANOW,
 };
+
 use pci::PciBdf;
 #[cfg(all(target_arch = "x86_64", feature = "pci_support"))]
 use pci::PciConfigIo;
@@ -88,9 +95,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 #[cfg(feature = "pci_support")]
 use vfio_ioctls::{VfioContainer, VfioDevice};
-use virtio_devices::transport::VirtioTransport;
 #[cfg(feature = "mmio_support")]
-use virtio_devices::transport::{VirtioMmioDevice, VirtioMmioDeviceActivator};
+use virtio_devices::transport::VirtioMmioDeviceActivator;
+use virtio_devices::transport::VirtioTransport;
 #[cfg(feature = "pci_support")]
 use virtio_devices::transport::{VirtioPciDevice, VirtioPciDeviceActivator};
 use virtio_devices::vhost_user::VhostUserConfig;
@@ -100,7 +107,10 @@ use virtio_devices::IommuMapping;
 use virtio_devices::{AccessPlatformMapping, VdpaDmaMapping, VirtioMemMappingSource};
 use virtio_devices::{ActivateError, Endpoint};
 
-use vm_allocator::{AddressAllocator, SystemAllocator};
+#[cfg(feature = "pci_support")]
+use vm_allocator::AddressAllocator;
+use vm_allocator::SystemAllocator;
+#[cfg(feature = "pci_support")]
 use vm_device::dma_mapping::vfio::VfioDmaMapping;
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_device::interrupt::{
@@ -119,8 +129,7 @@ use vm_migration::{
     SnapshotDataSection, Snapshottable, Transportable,
 };
 #[cfg(feature = "pci_support")]
-use vm_virtio::AccessPlatform;
-use vm_virtio::VirtioDeviceType;
+use vm_virtio::{AccessPlatform, VirtioDeviceType};
 use vmm_sys_util::eventfd::EventFd;
 
 #[cfg(any(feature = "mmio_support", target_arch = "aarch64"))]
@@ -144,6 +153,7 @@ const DISK_DEVICE_NAME_PREFIX: &str = "_disk";
 const FS_DEVICE_NAME_PREFIX: &str = "_fs";
 const NET_DEVICE_NAME_PREFIX: &str = "_net";
 const PMEM_DEVICE_NAME_PREFIX: &str = "_pmem";
+#[cfg(feature = "pci_support")]
 const VDPA_DEVICE_NAME_PREFIX: &str = "_vdpa";
 const VSOCK_DEVICE_NAME_PREFIX: &str = "_vsock";
 const WATCHDOG_DEVICE_NAME: &str = "__watchdog";
@@ -151,6 +161,7 @@ const WATCHDOG_DEVICE_NAME: &str = "__watchdog";
 const VFIO_DEVICE_NAME_PREFIX: &str = "_vfio";
 #[cfg(feature = "pci_support")]
 const VFIO_USER_DEVICE_NAME_PREFIX: &str = "_vfio_user";
+#[cfg(feature = "pci_support")]
 const VIRTIO_PCI_DEVICE_NAME_PREFIX: &str = "_virtio-pci";
 #[cfg(feature = "mmio_support")]
 const VIRTIO_MMIO_DEVICE_NAME_PREFIX: &str = "_virtio-mmio";
@@ -839,6 +850,7 @@ pub enum PciDeviceHandle {
     VfioUser(Arc<Mutex<VfioUserPciDevice>>),
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 struct MetaVirtioDevice {
     virtio_device: Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
@@ -1257,10 +1269,9 @@ impl DeviceManager {
 
         #[cfg(feature = "pci_support")]
         self.add_pci_devices(virtio_devices.clone())?;
-        
-        #[cfg(not(feature = "pci_support"))]
+
+        #[cfg(feature = "mmio_support")]
         self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
-        
 
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
@@ -1305,7 +1316,6 @@ impl DeviceManager {
         self.add_pci_devices(virtio_devices.clone())?;
         #[cfg(not(feature = "pci_support"))]
         self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
-        
 
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
@@ -1826,7 +1836,7 @@ impl DeviceManager {
     #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
     fn add_craton_uio_devices(
         &mut self,
-        interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
+        _interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
         uio_devices_info: Vec<uio::UioDeviceInfo>,
     ) -> DeviceManagerResult<()> {
         for uio_dev_info in uio_devices_info.iter() {
@@ -4425,7 +4435,7 @@ impl DeviceManager {
 
         Ok(PciDeviceInfo { id: handle.id, bdf })
     }
-
+    #[cfg(feature = "pci_support")]
     fn is_iommu_segment(&self, pci_segment_id: u16) -> bool {
         self.config
             .lock()
@@ -4603,7 +4613,8 @@ impl DeviceManager {
 
         // Trigger a GPIO pin 3 event to satisify use case 1.
         #[cfg(not(feature = "acpi"))]
-        return self.gpio_device
+        return self
+            .gpio_device
             .as_ref()
             .unwrap()
             .lock()
@@ -4648,6 +4659,7 @@ impl DeviceManager {
         self.uefi_flash.as_ref().unwrap().clone()
     }
 
+    #[cfg(feature = "pci_support")]
     fn validate_identifier(&self, id: &Option<String>) -> DeviceManagerResult<()> {
         if let Some(id) = id {
             if id.starts_with("__") {

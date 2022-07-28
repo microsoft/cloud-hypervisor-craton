@@ -18,7 +18,7 @@
 //! - arm64
 //!
 
-#![allow(clippy::significant_drop_in_scrutinee)]
+//#![allow(clippy::significant_drop_in_scrutinee)]
 
 #[macro_use]
 extern crate anyhow;

@@ -4,6 +4,7 @@
 
 #[cfg(feature = "pci_support")]
 use crate::device_manager::PciDeviceHandle;
+#[cfg(feature = "pci_support")]
 use pci::PciBdf;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

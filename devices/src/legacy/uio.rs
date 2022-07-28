@@ -5,10 +5,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::result;
 use std::sync::{Arc, Barrier};
-use std::{io, result};
 
-use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
 
 #[derive(Debug)]
@@ -95,7 +94,7 @@ pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>> {
                 for n in 0..num_interrupts {
                     /* we only care about the middle number of the 3; that's the interrupt */
                     let i = (n * 3 + 1) * 4;
-                    let slice = [bytes[i + 0], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+                    let slice = [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
                     let interrupt: u32 = u32::from_be_bytes(slice);
                     info!("   {:#x}", interrupt);
                     dev_info.interrupts.push(interrupt);
@@ -111,7 +110,7 @@ pub fn get_uio_devices_info() -> Result<Vec<UioDeviceInfo>> {
         ret.push(dev_info);
         dev_num += 1;
     }
-    return Ok(ret);
+    Ok(ret)
 }
 
 pub struct Uio {}
@@ -122,9 +121,15 @@ impl Uio {
     }
 }
 
+impl Default for Uio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BusDevice for Uio {
-    fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {}
-    fn write(&mut self, _base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
+    fn read(&mut self, _base: u64, _offset: u64, _data: &mut [u8]) {}
+    fn write(&mut self, _base: u64, _offset: u64, _data: &[u8]) -> Option<Arc<Barrier>> {
         None
     }
 }

@@ -32,6 +32,8 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+#[cfg(target_arch = "aarch64")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Barrier, Mutex};
@@ -1098,11 +1100,11 @@ impl MemoryManager {
     #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
     pub fn new_craton(
         vm: Arc<dyn hypervisor::Vm>,
-        config: &MemoryConfig,
+        _config: &MemoryConfig,
         ram_start: GuestAddress,
         ram_size: usize,
         ram_offset: u64,
-        ram_path: &PathBuf,
+        ram_path: &Path,
         phys_bits: u8,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         /* Nuno: just 1 ram region based on the uio device passed in */
@@ -1240,8 +1242,8 @@ impl MemoryManager {
         let dynamic = !tdx_enabled;
         #[cfg(feature = "acpi")]
         let acpi_address = if dynamic
-            && config.hotplug_method == HotplugMethod::Acpi
-            && (config.hotplug_size.unwrap_or_default() > 0)
+            && _config.hotplug_method == HotplugMethod::Acpi
+            && (_config.hotplug_size.unwrap_or_default() > 0)
         {
             Some(
                 allocator

@@ -66,11 +66,11 @@ use thiserror::Error;
 use vm_device::BusDevice;
 #[cfg(feature = "guest_debug")]
 use vm_memory::ByteValued;
-#[cfg(feature = "gdb")]
-use vm_memory::{Bytes, GuestAddressSpace};
 #[cfg(feature = "acpi")]
 use vm_memory::GuestAddress;
 use vm_memory::GuestMemoryAtomic;
+#[cfg(feature = "gdb")]
+use vm_memory::{Bytes, GuestAddressSpace};
 
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, SnapshotDataSection, Snapshottable,
@@ -214,7 +214,6 @@ struct GicD {
     pub reserved1: [u8; 3],
 }
 
-
 #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
 #[allow(dead_code)]
 #[repr(packed)]
@@ -225,7 +224,6 @@ struct GicR {
     pub base_address: u64,
     pub range_length: u32,
 }
-
 
 #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
 #[allow(dead_code)]
@@ -238,7 +236,6 @@ struct GicIts {
     pub base_address: u64,
     pub reserved1: u32,
 }
-
 
 #[cfg(all(target_arch = "aarch64", feature = "acpi"))]
 #[allow(dead_code)]

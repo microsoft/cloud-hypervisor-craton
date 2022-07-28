@@ -218,7 +218,6 @@ impl vm::Vm for KvmVm {
             .create_irq_chip()
             .map_err(|e| vm::HypervisorVmError::CreateIrq(e.into()))
     }
-    
     ///
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     ///

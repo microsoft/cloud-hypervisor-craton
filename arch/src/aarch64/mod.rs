@@ -10,14 +10,15 @@ pub mod layout;
 pub mod uefi;
 
 pub use self::fdt::DeviceInfoForFdt;
-use crate::{DeviceType, GuestMemoryMmap, NumaNodes, PciSpaceInfo, RegionType};
+#[cfg(feature = "acpi")]
+use crate::NumaNodes;
+use crate::{DeviceType, GuestMemoryMmap, PciSpaceInfo, RegionType};
 use hypervisor::arch::aarch64::gic::Vgic;
 use log::{log_enabled, Level};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::File;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use vm_memory::{Address, GuestAddress, GuestMemory, GuestUsize};
 
@@ -146,8 +147,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
     pci_space_info: &[PciSpaceInfo],
     virtio_iommu_bdf: Option<u32>,
     gic_device: &Arc<Mutex<dyn Vgic>>,
-    #[cfg(feature = "acpi")]
-    numa_nodes: &NumaNodes,
+    #[cfg(feature = "acpi")] numa_nodes: &NumaNodes,
     dtb_path: Option<File>,
     pmu_supported: bool,
 ) -> super::Result<()> {
@@ -163,7 +163,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
             gic_device,
             initrd,
             pci_space_info,
-            #[cfg(feature = "pci_support")]
+            #[cfg(feature = "acpi")]
             numa_nodes,
             virtio_iommu_bdf,
             pmu_supported,
@@ -235,7 +235,7 @@ pub fn get_ram_start() -> GuestAddress {
 pub fn get_uefi_start() -> GuestAddress {
     layout::UEFI_START
 }
-
+#[allow(dead_code)]
 // Auxiliary function to get the address where the device tree blob is loaded.
 fn get_fdt_addr() -> GuestAddress {
     unsafe { FDT_START }

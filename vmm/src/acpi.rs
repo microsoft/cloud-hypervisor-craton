@@ -787,7 +787,8 @@ pub fn create_acpi_tables(
     rsdp_offset
 }
 
-#[cfg(feature = "tdx")]
+#[allow(dead_code)]
+#[cfg(any(feature = "tdx", feature = "acpi"))]
 pub fn create_acpi_tables_tdx(
     device_manager: &Arc<Mutex<DeviceManager>>,
     cpu_manager: &Arc<Mutex<CpuManager>>,

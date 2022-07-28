@@ -24,7 +24,7 @@ use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
 };
-use vm_virtio::{AccessPlatform, Translatable};
+use vm_virtio::AccessPlatform;
 use vmm_sys_util::{errno::Result, eventfd::EventFd};
 
 const VENDOR_ID: u32 = 0;
@@ -57,7 +57,7 @@ impl VirtioInterrupt for VirtioInterruptIntx {
     fn trigger(&self, int_type: VirtioInterruptType) -> std::result::Result<(), std::io::Error> {
         let status = match int_type {
             VirtioInterruptType::Config => INTERRUPT_STATUS_CONFIG_CHANGED,
-            VirtioInterruptType::Queue(queue_index) => INTERRUPT_STATUS_USED_RING,
+            VirtioInterruptType::Queue(_queue_index) => INTERRUPT_STATUS_USED_RING,
         };
         self.interrupt_status
             .fetch_or(status as usize, Ordering::SeqCst);
@@ -154,7 +154,7 @@ impl VirtioMmioDevice {
         id: String,
         memory: GuestMemoryAtomic<GuestMemoryMmap>,
         device: Arc<Mutex<dyn VirtioDevice>>,
-        access_platform: Option<Arc<dyn AccessPlatform>>,
+        _access_platform: Option<Arc<dyn AccessPlatform>>,
         interrupt: Arc<dyn InterruptSourceGroup>,
         activate_evt: EventFd,
         pending_activations: Arc<Mutex<Vec<VirtioMmioDeviceActivator>>>,

@@ -11,11 +11,13 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+#[cfg(feature = "pci_support")]
+use crate::config::add_to_config;
+#[cfg(feature = "acpi")]
 use crate::config::NumaConfig;
 use crate::config::{
-    add_to_config, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
-    UserDeviceConfig, ValidationError, VdpaConfig, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig, UserDeviceConfig,
+    ValidationError, VdpaConfig, VmConfig, VsockConfig,
 };
 #[cfg(feature = "guest_debug")]
 use crate::coredump::{
@@ -34,9 +36,9 @@ use crate::migration::url_to_file;
 use crate::migration::{get_vm_snapshot, url_to_path, SNAPSHOT_CONFIG_FILE, SNAPSHOT_STATE_FILE};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::GuestMemoryMmap;
-use crate::{
-    PciDeviceInfo, CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID,
-};
+
+use crate::PciDeviceInfo;
+use crate::{CPU_MANAGER_SNAPSHOT_ID, DEVICE_MANAGER_SNAPSHOT_ID, MEMORY_MANAGER_SNAPSHOT_ID};
 use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
 #[cfg(target_arch = "x86_64")]
@@ -54,6 +56,7 @@ use arch::{NumaNode, NumaNodes};
 use devices::gic::GIC_V3_ITS_SNAPSHOT_ID;
 #[cfg(target_arch = "aarch64")]
 use devices::interrupt_controller::{self, InterruptController};
+#[cfg(feature = "acpi")]
 use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
@@ -74,7 +77,7 @@ use signal_hook::{
     iterator::Signals,
 };
 use std::cmp;
-#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
+#[cfg(feature = "acpi")]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -1313,10 +1316,7 @@ impl Vm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn configure_system(
-        &mut self,
-        #[cfg(feature = "acpi")] rsdp_addr: GuestAddress,
-    ) -> Result<()> {
+    fn configure_system(&mut self, #[cfg(feature = "acpi")] rsdp_addr: GuestAddress) -> Result<()> {
         info!("Configuring system");
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
@@ -1369,7 +1369,10 @@ impl Vm {
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
         let vcpu_topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
+        #[cfg(feature = "pci_support")]
         let mut pci_space_info: Vec<PciSpaceInfo> = Vec::new();
+        #[cfg(not(feature = "pci_support"))]
+        let pci_space_info: Vec<PciSpaceInfo> = Vec::new();
         let initramfs_config = match self.initramfs {
             Some(_) => Some(self.load_initramfs(&mem)?),
             None => None,
@@ -1668,7 +1671,7 @@ impl Vm {
         Err(Error::ResizeZone)
     }
     #[cfg(not(feature = "pci_support"))]
-    pub fn add_device(&mut self, mut device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
+    pub fn add_device(&mut self, mut _device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
         Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
     }
     #[cfg(feature = "pci_support")]
@@ -1912,7 +1915,7 @@ impl Vm {
         Ok(pci_device_info)
     }
     #[cfg(not(feature = "pci_support"))]
-    pub fn add_vdpa(&mut self, mut vdpa_cfg: VdpaConfig) -> Result<PciDeviceInfo> {
+    pub fn add_vdpa(&mut self, mut _vdpa_cfg: VdpaConfig) -> Result<PciDeviceInfo> {
         Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
     }
     #[cfg(feature = "pci_support")]
@@ -3694,6 +3697,7 @@ mod tests {
             &gic,
             &None,
             &Vec::new(),
+            #[cfg(feature = "pci_support")]
             &BTreeMap::new(),
             None,
             true,

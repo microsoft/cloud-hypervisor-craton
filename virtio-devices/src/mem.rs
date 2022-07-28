@@ -100,6 +100,7 @@ const RESIZE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
 
+#[cfg(feature = "pci_support")]
 // Virtio features
 const VIRTIO_MEM_F_ACPI_PXM: u8 = 0;
 
@@ -836,7 +837,10 @@ impl Mem {
             ));
         }
 
+        #[cfg(feature = "pci_support")]
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
+        #[cfg(not(feature = "pci_support"))]
+        let avail_features = 1u64 << VIRTIO_F_VERSION_1;
 
         let mut config = VirtioMemConfig {
             block_size: VIRTIO_MEM_DEFAULT_BLOCK_SIZE,

@@ -2675,6 +2675,7 @@ impl VmConfig {
 
         #[cfg(feature = "tdx")]
         let tdx = vm_params.tdx.map(TdxConfig::parse).transpose()?;
+        #[cfg(target_arch = "aarch64")]
         let mut dtb: Option<DtbConfig> = None;
         #[cfg(target_arch = "aarch64")]
         if let Some(k) = vm_params.dtb {
@@ -3339,6 +3340,8 @@ mod tests {
             #[cfg(feature = "gdb")]
             gdb: false,
             platform: None,
+            #[cfg(target_arch = "aarch64")]
+            craton: false,
             #[cfg(target_arch = "aarch64")]
             dtb: None,
         };
