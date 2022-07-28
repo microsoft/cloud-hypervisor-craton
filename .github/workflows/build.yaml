@@ -54,5 +54,8 @@ jobs:
       - name: Release Build (default features)
         run: cargo build --locked --all --release --target=${{ matrix.target }}
 
+      - name: Build (kvm + mmio)
+        run: cargo rustc --locked --bin cloud-hypervisor --no-default-features --features "kvm,mmio"  -- -D warnings
+
       - name: Check build did not modify any files
         run: test -z "$(git status --porcelain)"
