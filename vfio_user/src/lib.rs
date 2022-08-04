@@ -4,9 +4,7 @@
 //
 
 use std::ffi::CString;
-use std::fs::File;
 use std::io::{IoSlice, Read, Write};
-use std::mem::size_of;
 use std::num::Wrapping;
 use std::os::unix::net::UnixStream;
 use std::os::unix::prelude::RawFd;
@@ -51,7 +49,7 @@ impl Default for Command {
 
 #[allow(dead_code)]
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum HeaderFlags {
     Command = 0,
     Reply = 1,
@@ -236,7 +234,6 @@ pub struct Region {
     pub index: u32,
     pub size: u64,
     pub file_offset: Option<FileOffset>,
-    pub sparse_areas: Vec<vfio_region_sparse_mmap_area>,
 }
 
 #[derive(Debug)]
@@ -258,8 +255,6 @@ pub enum Error {
     StreamWrite(#[source] std::io::Error),
     #[error("Error reading from stream: {0}")]
     StreamRead(#[source] std::io::Error),
-    #[error("Error shutting down stream: {0}")]
-    StreamShutdown(#[source] std::io::Error),
     #[error("Error writing with file descriptors: {0}")]
     SendWithFd(#[source] vmm_sys_util::errno::Error),
     #[error("Error reading with file descriptors: {0}")]
@@ -297,7 +292,7 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::Version,
                 flags: HeaderFlags::Command as u32,
-                message_size: (size_of::<Version>() + version_data.len() + 1) as u32,
+                message_size: (std::mem::size_of::<Version>() + version_data.len() + 1) as u32,
                 ..Default::default()
             },
             major: 0,
@@ -333,7 +328,7 @@ impl Client {
 
         let mut server_version_data = Vec::new();
         server_version_data.resize(
-            server_version.header.message_size as usize - size_of::<Version>(),
+            server_version.header.message_size as usize - std::mem::size_of::<Version>(),
             0,
         );
         self.stream
@@ -364,10 +359,10 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::DmaMap,
                 flags: HeaderFlags::Command as u32,
-                message_size: size_of::<DmaMap>() as u32,
+                message_size: std::mem::size_of::<DmaMap>() as u32,
                 ..Default::default()
             },
-            argsz: (size_of::<DmaMap>() - size_of::<Header>()) as u32,
+            argsz: (std::mem::size_of::<DmaMap>() - std::mem::size_of::<Header>()) as u32,
             flags: DmaMapFlags::ReadWrite,
             offset,
             address,
@@ -394,10 +389,10 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::DmaUnmap,
                 flags: HeaderFlags::Command as u32,
-                message_size: size_of::<DmaUnmap>() as u32,
+                message_size: std::mem::size_of::<DmaUnmap>() as u32,
                 ..Default::default()
             },
-            argsz: (size_of::<DmaUnmap>() - size_of::<Header>()) as u32,
+            argsz: (std::mem::size_of::<DmaUnmap>() - std::mem::size_of::<Header>()) as u32,
             flags: 0,
             address,
             size,
@@ -423,7 +418,7 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::DeviceReset,
                 flags: HeaderFlags::Command as u32,
-                message_size: size_of::<DeviceReset>() as u32,
+                message_size: std::mem::size_of::<DeviceReset>() as u32,
                 ..Default::default()
             },
         };
@@ -448,10 +443,10 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::DeviceGetInfo,
                 flags: HeaderFlags::Command as u32,
-                message_size: size_of::<DeviceGetInfo>() as u32,
+                message_size: std::mem::size_of::<DeviceGetInfo>() as u32,
                 ..Default::default()
             },
-            argsz: size_of::<DeviceGetInfo>() as u32,
+            argsz: std::mem::size_of::<DeviceGetInfo>() as u32,
             ..Default::default()
         };
         debug!("Command: {:?}", get_info);
@@ -477,62 +472,20 @@ impl Client {
         let num_regions = reply.num_regions;
         let mut regions = Vec::new();
         for index in 0..num_regions {
-            let (region_info, fd, sparse_areas) = self.get_region_info(index)?;
-            regions.push(Region {
-                flags: region_info.flags,
-                index: region_info.index,
-                size: region_info.size,
-                file_offset: fd.map(|fd| FileOffset::new(fd, region_info.offset)),
-                sparse_areas,
-            });
-        }
-
-        Ok(regions)
-    }
-
-    fn get_region_info(
-        &mut self,
-        index: u32,
-    ) -> Result<
-        (
-            vfio_region_info,
-            Option<File>,
-            Vec<vfio_region_sparse_mmap_area>,
-        ),
-        Error,
-    > {
-        // Retrieve the region info without capability
-        let mut get_region_info = DeviceGetRegionInfo {
-            header: Header {
-                message_id: self.next_message_id.0,
-                command: Command::DeviceGetRegionInfo,
-                flags: HeaderFlags::Command as u32,
-                message_size: std::mem::size_of::<DeviceGetRegionInfo>() as u32,
-                ..Default::default()
-            },
-            region_info: vfio_region_info {
-                argsz: size_of::<vfio_region_info>() as u32,
-                index,
-                ..Default::default()
-            },
-        };
-        debug!("Command: {:?}", get_region_info);
-        self.next_message_id += Wrapping(1);
-
-        self.stream
-            .write_all(get_region_info.as_slice())
-            .map_err(Error::StreamWrite)?;
-
-        let mut reply = DeviceGetRegionInfo::default();
-        let (_, fd) = self
-            .stream
-            .recv_with_fd(reply.as_mut_slice())
-            .map_err(Error::ReceiveWithFd)?;
-        debug!("Reply: {:?}", reply);
-
-        // Retrieve the region info again with capabilities if needed
-        if reply.region_info.argsz > std::mem::size_of::<vfio_region_info>() as u32 {
-            get_region_info.region_info.argsz = reply.region_info.argsz;
+            let get_region_info = DeviceGetRegionInfo {
+                header: Header {
+                    message_id: self.next_message_id.0,
+                    command: Command::DeviceGetRegionInfo,
+                    flags: HeaderFlags::Command as u32,
+                    message_size: std::mem::size_of::<DeviceGetRegionInfo>() as u32,
+                    ..Default::default()
+                },
+                region_info: vfio_region_info {
+                    argsz: 1024, // Arbitrary max size
+                    index,
+                    ..Default::default()
+                },
+            };
             debug!("Command: {:?}", get_region_info);
             self.next_message_id += Wrapping(1);
 
@@ -547,94 +500,24 @@ impl Client {
                 .map_err(Error::ReceiveWithFd)?;
             debug!("Reply: {:?}", reply);
 
-            let cap_size = reply.region_info.argsz - std::mem::size_of::<vfio_region_info>() as u32;
-            assert_eq!(
-                cap_size,
-                reply.header.message_size - size_of::<DeviceGetRegionInfo>() as u32
+            regions.push(Region {
+                flags: reply.region_info.flags,
+                index: reply.region_info.index,
+                size: reply.region_info.size,
+                file_offset: fd.map(|fd| FileOffset::new(fd, reply.region_info.offset)),
+            });
+
+            // TODO: Handle region with capabilities
+            let mut _cap_data = Vec::with_capacity(
+                reply.header.message_size as usize - std::mem::size_of::<DeviceGetRegionInfo>(),
             );
-            let mut cap_data = Vec::with_capacity(cap_size as usize);
-            cap_data.resize(cap_data.capacity(), 0u8);
+            _cap_data.resize(_cap_data.capacity(), 0u8);
             self.stream
-                .read_exact(cap_data.as_mut_slice())
+                .read_exact(_cap_data.as_mut_slice())
                 .map_err(Error::StreamRead)?;
-
-            let sparse_areas = Self::parse_region_caps(&cap_data, &reply.region_info)?;
-
-            Ok((reply.region_info, fd, sparse_areas))
-        } else {
-            Ok((reply.region_info, fd, Vec::new()))
-        }
-    }
-
-    fn parse_region_caps(
-        cap_data: &[u8],
-        region_info: &vfio_region_info,
-    ) -> Result<Vec<vfio_region_sparse_mmap_area>, Error> {
-        let mut sparse_areas: Vec<vfio_region_sparse_mmap_area> = Vec::new();
-
-        let cap_size = cap_data.len() as u32;
-        let cap_header_size = size_of::<vfio_info_cap_header>() as u32;
-        let mmap_cap_size = size_of::<vfio_region_info_cap_sparse_mmap>() as u32;
-        let mmap_area_size = size_of::<vfio_region_sparse_mmap_area>() as u32;
-
-        let cap_data_ptr = cap_data.as_ptr() as *const u8;
-        let mut region_info_offset = region_info.cap_offset;
-        while region_info_offset != 0 {
-            // calculate the offset from the begining of the cap_data based on the offset
-            // that is relative to the begining of the VFIO region info structure
-            let cap_offset = region_info_offset - size_of::<vfio_region_info>() as u32;
-            if cap_offset + cap_header_size > cap_size {
-                warn!(
-                    "Unexpected end of cap data: 'cap_offset + cap_header_size > cap_size' \
-                cap_offset = {}, cap_header_size = {}, cap_size = {}",
-                    cap_offset, cap_header_size, cap_size
-                );
-                break;
-            }
-
-            // Safe because the `cap_data_ptr` is valid and the `cap_offset` is checked above
-            let cap_ptr = unsafe { cap_data_ptr.offset(cap_offset as isize) };
-            let cap_header = unsafe { &*(cap_ptr as *const vfio_info_cap_header) };
-            match cap_header.id as u32 {
-                VFIO_REGION_INFO_CAP_SPARSE_MMAP => {
-                    if cap_offset + mmap_cap_size > cap_size {
-                        warn!(
-                            "Unexpected end of cap data: 'cap_offset + mmap_cap_size > cap_size' \
-                        cap_offset = {}, mmap_cap_size = {}, cap_size = {}",
-                            cap_offset, mmap_cap_size, cap_size
-                        );
-                        break;
-                    }
-                    // Safe because the `cap_ptr` is valid and its size is also checked above
-                    let sparse_mmap = unsafe {
-                        &*(cap_ptr as *mut u8 as *const vfio_region_info_cap_sparse_mmap)
-                    };
-
-                    let area_num = sparse_mmap.nr_areas;
-                    if cap_offset + mmap_cap_size + area_num * mmap_area_size > cap_size {
-                        warn!("Unexpected end of cap data: 'cap_offset + mmap_cap_size + area_num * mmap_area_size > cap_size' \
-                        cap_offset = {}, mmap_cap_size = {}, area_num = {}, mmap_area_size = {}, cap_size = {}",
-                        cap_offset, mmap_cap_size, area_num, mmap_area_size, cap_size);
-                        break;
-                    }
-                    // Safe because the `sparse_mmap` is valid and its size is also checked above
-                    let areas =
-                        unsafe { sparse_mmap.areas.as_slice(sparse_mmap.nr_areas as usize) };
-                    for area in areas.iter() {
-                        sparse_areas.push(*area);
-                    }
-                }
-                _ => {
-                    warn!(
-                        "Ignoring unsupported vfio region capability (id = '{}')",
-                        cap_header.id
-                    );
-                }
-            }
-            region_info_offset = cap_header.next;
         }
 
-        Ok(sparse_areas)
+        Ok(regions)
     }
 
     pub fn region_read(&mut self, region: u32, offset: u64, data: &mut [u8]) -> Result<(), Error> {
@@ -643,7 +526,7 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::RegionRead,
                 flags: HeaderFlags::Command as u32,
-                message_size: size_of::<RegionAccess>() as u32,
+                message_size: std::mem::size_of::<RegionAccess>() as u32,
                 ..Default::default()
             },
             offset,
@@ -671,7 +554,7 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::RegionWrite,
                 flags: HeaderFlags::Command as u32,
-                message_size: (size_of::<RegionAccess>() + data.len()) as u32,
+                message_size: (std::mem::size_of::<RegionAccess>() + data.len()) as u32,
                 ..Default::default()
             },
             offset,
@@ -703,10 +586,10 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::GetIrqInfo,
                 flags: HeaderFlags::Command as u32,
-                message_size: size_of::<GetIrqInfo>() as u32,
+                message_size: std::mem::size_of::<GetIrqInfo>() as u32,
                 ..Default::default()
             },
-            argsz: (size_of::<GetIrqInfo>() - size_of::<Header>()) as u32,
+            argsz: (std::mem::size_of::<GetIrqInfo>() - std::mem::size_of::<Header>()) as u32,
             flags: 0,
             index,
             count: 0,
@@ -744,10 +627,10 @@ impl Client {
                 message_id: self.next_message_id.0,
                 command: Command::SetIrqs,
                 flags: HeaderFlags::Command as u32,
-                message_size: size_of::<SetIrqs>() as u32,
+                message_size: std::mem::size_of::<SetIrqs>() as u32,
                 ..Default::default()
             },
-            argsz: (size_of::<SetIrqs>() - size_of::<Header>()) as u32,
+            argsz: (std::mem::size_of::<SetIrqs>() - std::mem::size_of::<Header>()) as u32,
             flags,
             start,
             index,
@@ -781,11 +664,5 @@ impl Client {
 
     pub fn resettable(&self) -> bool {
         self.resettable
-    }
-
-    pub fn shutdown(&self) -> Result<(), Error> {
-        self.stream
-            .shutdown(std::net::Shutdown::Both)
-            .map_err(Error::StreamShutdown)
     }
 }

@@ -10,7 +10,7 @@
 
 use crate::arch::x86::{msr_index, SegmentRegisterOps, MTRR_ENABLE, MTRR_MEM_TYPE_WB};
 use crate::kvm::{Cap, Kvm, KvmError, KvmResult};
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 
 ///
 /// Export generically-named wrappers of kvm-bindings for Unix-based platforms
@@ -129,9 +129,6 @@ pub fn check_required_kvm_extensions(kvm: &Kvm) -> KvmResult<()> {
     }
     if !kvm.check_extension(Cap::SetTssAddr) {
         return Err(KvmError::CapabilityMissing(Cap::SetTssAddr));
-    }
-    if !kvm.check_extension(Cap::ImmediateExit) {
-        return Err(KvmError::CapabilityMissing(Cap::ImmediateExit));
     }
     Ok(())
 }

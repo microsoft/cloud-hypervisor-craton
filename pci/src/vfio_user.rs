@@ -3,12 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::vfio::{Interrupt, UserMemoryRegion, Vfio, VfioCommon, VfioError};
-use crate::{BarReprogrammingParams, PciBarConfiguration, VfioPciError};
+use crate::vfio::{Interrupt, Vfio, VfioCommon, VfioError};
+use crate::{BarReprogrammingParams, PciBarRegionType, VfioPciError};
 use crate::{
-    PciBdf, PciClassCode, PciConfiguration, PciDevice, PciDeviceError, PciHeaderType, PciSubclass,
+    PciClassCode, PciConfiguration, PciDevice, PciDeviceError, PciHeaderType, PciSubclass,
 };
-use anyhow::anyhow;
 use hypervisor::HypervisorVmError;
 use std::any::Any;
 use std::os::unix::prelude::AsRawFd;
@@ -22,20 +21,19 @@ use vfio_user::{Client, Error as VfioUserError};
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_device::interrupt::{InterruptManager, InterruptSourceGroup, MsiIrqGroupConfig};
-use vm_device::{BusDevice, Resource};
+use vm_device::BusDevice;
 use vm_memory::bitmap::AtomicBitmap;
 use vm_memory::{
     Address, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryRegion, GuestRegionMmap,
+    GuestUsize,
 };
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 pub struct VfioUserPciDevice {
-    id: String,
     vm: Arc<dyn hypervisor::Vm>,
     client: Arc<Mutex<Client>>,
+    vfio_wrapper: VfioUserClientWrapper,
     common: VfioCommon,
-    memory_slot: Arc<dyn Fn() -> u32 + Send + Sync>,
 }
 
 #[derive(Error, Debug)]
@@ -64,16 +62,11 @@ impl PciSubclass for PciVfioUserSubclass {
 }
 
 impl VfioUserPciDevice {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        id: String,
         vm: &Arc<dyn hypervisor::Vm>,
         client: Arc<Mutex<Client>>,
-        msi_interrupt_manager: Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
+        msi_interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = MsiIrqGroupConfig>>,
         legacy_interrupt_group: Option<Arc<dyn InterruptSourceGroup>>,
-        bdf: PciBdf,
-        restoring: bool,
-        memory_slot: Arc<dyn Fn() -> u32 + Send + Sync>,
     ) -> Result<Self, VfioUserPciDeviceError> {
         // This is used for the BAR and capabilities only
         let configuration = PciConfiguration::new(
@@ -109,31 +102,29 @@ impl VfioUserPciDevice {
                 msi: None,
                 msix: None,
             },
-            msi_interrupt_manager,
-            legacy_interrupt_group,
-            vfio_wrapper: Arc::new(vfio_wrapper) as Arc<dyn Vfio>,
         };
 
-        // No need to parse capabilities from the device if on the restore path.
-        // The initialization will be performed later when restore() will be
-        // called.
-        if !restoring {
-            common.parse_capabilities(bdf);
-            common
-                .initialize_legacy_interrupt()
-                .map_err(VfioUserPciDeviceError::InitializeLegacyInterrupts)?;
-        }
+        common.parse_capabilities(msi_interrupt_manager, &vfio_wrapper);
+        common
+            .initialize_legacy_interrupt(legacy_interrupt_group, &vfio_wrapper)
+            .map_err(VfioUserPciDeviceError::InitializeLegacyInterrupts)?;
 
         Ok(Self {
-            id,
             vm: vm.clone(),
             client,
+            vfio_wrapper,
             common,
-            memory_slot,
         })
     }
 
-    pub fn map_mmio_regions(&mut self) -> Result<(), VfioUserPciDeviceError> {
+    pub fn map_mmio_regions<F>(
+        &mut self,
+        vm: &Arc<dyn hypervisor::Vm>,
+        mem_slot: F,
+    ) -> Result<(), VfioUserPciDeviceError>
+    where
+        F: Fn() -> u32,
+    {
         for mmio_region in &mut self.common.mmio_regions {
             let region_flags = self
                 .client
@@ -151,15 +142,6 @@ impl VfioUserPciDevice {
                 .file_offset
                 .clone();
 
-            let sparse_areas = self
-                .client
-                .lock()
-                .unwrap()
-                .region(mmio_region.index)
-                .unwrap()
-                .sparse_areas
-                .clone();
-
             if region_flags & VFIO_REGION_INFO_FLAG_MMAP != 0 {
                 let mut prot = 0;
                 if region_flags & VFIO_REGION_INFO_FLAG_READ != 0 {
@@ -169,58 +151,41 @@ impl VfioUserPciDevice {
                     prot |= libc::PROT_WRITE;
                 }
 
-                let mmaps = if sparse_areas.is_empty() {
-                    vec![vfio_region_sparse_mmap_area {
-                        offset: 0,
-                        size: mmio_region.length,
-                    }]
-                } else {
-                    sparse_areas
+                let host_addr = unsafe {
+                    libc::mmap(
+                        null_mut(),
+                        mmio_region.length as usize,
+                        prot,
+                        libc::MAP_SHARED,
+                        file_offset.as_ref().unwrap().file().as_raw_fd(),
+                        file_offset.as_ref().unwrap().start() as libc::off_t,
+                    )
                 };
 
-                for s in mmaps.iter() {
-                    let host_addr = unsafe {
-                        libc::mmap(
-                            null_mut(),
-                            s.size as usize,
-                            prot,
-                            libc::MAP_SHARED,
-                            file_offset.as_ref().unwrap().file().as_raw_fd(),
-                            file_offset.as_ref().unwrap().start() as libc::off_t
-                                + s.offset as libc::off_t,
-                        )
-                    };
-
-                    if host_addr == libc::MAP_FAILED {
-                        error!(
-                            "Could not mmap regions, error:{}",
-                            std::io::Error::last_os_error()
-                        );
-                        continue;
-                    }
-
-                    let user_memory_region = UserMemoryRegion {
-                        slot: (self.memory_slot)(),
-                        start: mmio_region.start.0 + s.offset,
-                        size: s.size,
-                        host_addr: host_addr as u64,
-                    };
-
-                    mmio_region.user_memory_regions.push(user_memory_region);
-
-                    let mem_region = self.vm.make_user_memory_region(
-                        user_memory_region.slot,
-                        user_memory_region.start,
-                        user_memory_region.size,
-                        user_memory_region.host_addr,
-                        false,
-                        false,
+                if host_addr == libc::MAP_FAILED {
+                    error!(
+                        "Could not mmap regions, error:{}",
+                        std::io::Error::last_os_error()
                     );
-
-                    self.vm
-                        .create_user_memory_region(mem_region)
-                        .map_err(VfioUserPciDeviceError::MapRegionGuest)?;
+                    continue;
                 }
+
+                let slot = mem_slot();
+                let mem_region = vm.make_user_memory_region(
+                    slot,
+                    mmio_region.start.0,
+                    mmio_region.length as u64,
+                    host_addr as u64,
+                    false,
+                    false,
+                );
+
+                vm.create_user_memory_region(mem_region)
+                    .map_err(VfioUserPciDeviceError::MapRegionGuest)?;
+
+                mmio_region.mem_slot = Some(slot);
+                mmio_region.host_addr = Some(host_addr as u64);
+                mmio_region.mmap_size = Some(mmio_region.length as usize);
             }
         }
 
@@ -229,13 +194,17 @@ impl VfioUserPciDevice {
 
     pub fn unmap_mmio_regions(&mut self) {
         for mmio_region in self.common.mmio_regions.iter() {
-            for user_memory_region in mmio_region.user_memory_regions.iter() {
+            if let (Some(host_addr), Some(mmap_size), Some(mem_slot)) = (
+                mmio_region.host_addr,
+                mmio_region.mmap_size,
+                mmio_region.mem_slot,
+            ) {
                 // Remove region
                 let r = self.vm.make_user_memory_region(
-                    user_memory_region.slot,
-                    user_memory_region.start,
-                    user_memory_region.size,
-                    user_memory_region.host_addr,
+                    mem_slot,
+                    mmio_region.start.raw_value(),
+                    mmap_size as u64,
+                    host_addr as u64,
                     false,
                     false,
                 );
@@ -244,13 +213,7 @@ impl VfioUserPciDevice {
                     error!("Could not remove the userspace memory region: {}", e);
                 }
 
-                // Remove mmaps
-                let ret = unsafe {
-                    libc::munmap(
-                        user_memory_region.host_addr as *mut libc::c_void,
-                        user_memory_region.size as usize,
-                    )
-                };
+                let ret = unsafe { libc::munmap(host_addr as *mut libc::c_void, mmap_size) };
                 if ret != 0 {
                     error!(
                         "Could not unmap region {}, error:{}",
@@ -426,12 +389,11 @@ impl Vfio for VfioUserClientWrapper {
 impl PciDevice for VfioUserPciDevice {
     fn allocate_bars(
         &mut self,
-        allocator: &Arc<Mutex<SystemAllocator>>,
+        allocator: &mut SystemAllocator,
         mmio_allocator: &mut AddressAllocator,
-        resources: Option<Vec<Resource>>,
-    ) -> Result<Vec<PciBarConfiguration>, PciDeviceError> {
+    ) -> Result<Vec<(GuestAddress, GuestUsize, PciBarRegionType)>, PciDeviceError> {
         self.common
-            .allocate_bars(allocator, mmio_allocator, resources)
+            .allocate_bars(allocator, mmio_allocator, &self.vfio_wrapper)
     }
 
     fn free_bars(
@@ -462,19 +424,22 @@ impl PciDevice for VfioUserPciDevice {
         offset: u64,
         data: &[u8],
     ) -> Option<Arc<Barrier>> {
-        self.common.write_config_register(reg_idx, offset, data)
+        self.common
+            .write_config_register(reg_idx, offset, data, &self.vfio_wrapper)
     }
 
     fn read_config_register(&mut self, reg_idx: usize) -> u32 {
-        self.common.read_config_register(reg_idx)
+        self.common
+            .read_config_register(reg_idx, &self.vfio_wrapper)
     }
 
     fn read_bar(&mut self, base: u64, offset: u64, data: &mut [u8]) {
-        self.common.read_bar(base, offset, data)
+        self.common.read_bar(base, offset, data, &self.vfio_wrapper)
     }
 
     fn write_bar(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<Barrier>> {
-        self.common.write_bar(base, offset, data)
+        self.common
+            .write_bar(base, offset, data, &self.vfio_wrapper)
     }
 
     fn move_bar(&mut self, old_base: u64, new_base: u64) -> Result<(), std::io::Error> {
@@ -483,51 +448,41 @@ impl PciDevice for VfioUserPciDevice {
             if mmio_region.start.raw_value() == old_base {
                 mmio_region.start = GuestAddress(new_base);
 
-                for user_memory_region in mmio_region.user_memory_regions.iter_mut() {
-                    // Remove old region
-                    let old_region = self.vm.make_user_memory_region(
-                        user_memory_region.slot,
-                        user_memory_region.start,
-                        user_memory_region.size,
-                        user_memory_region.host_addr,
-                        false,
-                        false,
-                    );
+                if let Some(mem_slot) = mmio_region.mem_slot {
+                    if let Some(host_addr) = mmio_region.host_addr {
+                        // Remove original region
+                        let old_region = self.vm.make_user_memory_region(
+                            mem_slot,
+                            old_base,
+                            mmio_region.length as u64,
+                            host_addr as u64,
+                            false,
+                            false,
+                        );
 
-                    self.vm
-                        .remove_user_memory_region(old_region)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                        self.vm
+                            .remove_user_memory_region(old_region)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-                    // Update the user memory region with the correct start address.
-                    if new_base > old_base {
-                        user_memory_region.start += new_base - old_base;
-                    } else {
-                        user_memory_region.start -= old_base - new_base;
+                        let new_region = self.vm.make_user_memory_region(
+                            mem_slot,
+                            new_base,
+                            mmio_region.length as u64,
+                            host_addr as u64,
+                            false,
+                            false,
+                        );
+
+                        self.vm
+                            .create_user_memory_region(new_region)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
                     }
-
-                    // Insert new region
-                    let new_region = self.vm.make_user_memory_region(
-                        user_memory_region.slot,
-                        user_memory_region.start,
-                        user_memory_region.size,
-                        user_memory_region.host_addr,
-                        false,
-                        false,
-                    );
-
-                    self.vm
-                        .create_user_memory_region(new_region)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
                 }
                 info!("Moved bar 0x{:x} -> 0x{:x}", old_base, new_base);
             }
         }
 
         Ok(())
-    }
-
-    fn id(&self) -> Option<String> {
-        Some(self.id.clone())
     }
 }
 
@@ -537,59 +492,21 @@ impl Drop for VfioUserPciDevice {
 
         if let Some(msix) = &self.common.interrupt.msix {
             if msix.bar.enabled() {
-                self.common.disable_msix();
+                self.common.disable_msix(&self.vfio_wrapper);
             }
         }
 
         if let Some(msi) = &self.common.interrupt.msi {
             if msi.cfg.enabled() {
-                self.common.disable_msi()
+                self.common.disable_msi(&self.vfio_wrapper)
             }
         }
 
         if self.common.interrupt.intx_in_use() {
-            self.common.disable_intx();
-        }
-
-        if let Err(e) = self.client.lock().unwrap().shutdown() {
-            error!("Failed shutting down vfio-user client: {}", e);
+            self.common.disable_intx(&self.vfio_wrapper);
         }
     }
 }
-
-impl Pausable for VfioUserPciDevice {}
-
-impl Snapshottable for VfioUserPciDevice {
-    fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        let mut vfio_pci_dev_snapshot = Snapshot::new(&self.id);
-
-        // Snapshot VfioCommon
-        vfio_pci_dev_snapshot.add_snapshot(self.common.snapshot()?);
-
-        Ok(vfio_pci_dev_snapshot)
-    }
-
-    fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        // Restore VfioCommon
-        if let Some(vfio_common_snapshot) = snapshot.snapshots.get(&self.common.id()) {
-            self.common.restore(*vfio_common_snapshot.clone())?;
-            self.map_mmio_regions().map_err(|e| {
-                MigratableError::Restore(anyhow!(
-                    "Could not map MMIO regions for VfioUserPciDevice on restore {:?}",
-                    e
-                ))
-            })?;
-        }
-
-        Ok(())
-    }
-}
-impl Transportable for VfioUserPciDevice {}
-impl Migratable for VfioUserPciDevice {}
 
 pub struct VfioUserDmaMapping<M: GuestAddressSpace> {
     client: Arc<Mutex<Client>>,
@@ -624,10 +541,10 @@ impl<M: GuestAddressSpace + Sync + Send> ExternalDmaMapping for VfioUserDmaMappi
                     )
                 })
         } else {
-            Err(std::io::Error::new(
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Region not found for 0x{:x}", gpa),
-            ))
+            ));
         }
     }
 

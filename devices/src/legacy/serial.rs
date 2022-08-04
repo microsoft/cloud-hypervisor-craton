@@ -339,7 +339,6 @@ mod tests {
             &self,
             _index: InterruptIndex,
             _config: InterruptSourceConfig,
-            _masked: bool,
         ) -> result::Result<(), std::io::Error> {
             Ok(())
         }

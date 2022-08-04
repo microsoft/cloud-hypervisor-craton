@@ -16,14 +16,12 @@
 /// to temporary buffers, before passing it on to the vsock backend.
 ///
 use byteorder::{ByteOrder, LittleEndian};
-use std::sync::Arc;
 
 use super::defs;
 use super::{Result, VsockError};
 use crate::{get_host_address_range, GuestMemoryMmap};
 use virtio_queue::DescriptorChain;
-use vm_memory::GuestMemoryLoadGuard;
-use vm_virtio::{AccessPlatform, Translatable};
+use vm_memory::GuestMemoryAtomic;
 
 // The vsock packet header is defined by the C struct:
 //
@@ -108,8 +106,7 @@ impl VsockPacket {
     /// creating the wrapper.
     ///
     pub fn from_tx_virtq_head(
-        desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
-        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        desc_chain: &mut DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>,
     ) -> Result<Self> {
         let head = desc_chain.next().ok_or(VsockError::HdrDescMissing)?;
 
@@ -125,13 +122,8 @@ impl VsockPacket {
         }
 
         let mut pkt = Self {
-            hdr: get_host_address_range(
-                desc_chain.memory(),
-                head.addr()
-                    .translate_gva(access_platform, head.len() as usize),
-                VSOCK_PKT_HDR_SIZE,
-            )
-            .ok_or(VsockError::GuestMemory)? as *mut u8,
+            hdr: get_host_address_range(desc_chain.memory(), head.addr(), VSOCK_PKT_HDR_SIZE)
+                .ok_or(VsockError::GuestMemory)? as *mut u8,
             buf: None,
             buf_size: 0,
         };
@@ -163,14 +155,8 @@ impl VsockPacket {
 
         pkt.buf_size = buf_desc.len() as usize;
         pkt.buf = Some(
-            get_host_address_range(
-                desc_chain.memory(),
-                buf_desc
-                    .addr()
-                    .translate_gva(access_platform, buf_desc.len() as usize),
-                pkt.buf_size,
-            )
-            .ok_or(VsockError::GuestMemory)? as *mut u8,
+            get_host_address_range(desc_chain.memory(), buf_desc.addr(), pkt.buf_size)
+                .ok_or(VsockError::GuestMemory)? as *mut u8,
         );
 
         Ok(pkt)
@@ -182,8 +168,7 @@ impl VsockPacket {
     /// descriptor. Bounds and pointer checks are performed when creating the wrapper.
     ///
     pub fn from_rx_virtq_head(
-        desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
-        access_platform: Option<&Arc<dyn AccessPlatform>>,
+        desc_chain: &mut DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>,
     ) -> Result<Self> {
         let head = desc_chain.next().ok_or(VsockError::HdrDescMissing)?;
 
@@ -206,22 +191,11 @@ impl VsockPacket {
         let buf_size = buf_desc.len() as usize;
 
         Ok(Self {
-            hdr: get_host_address_range(
-                desc_chain.memory(),
-                head.addr()
-                    .translate_gva(access_platform, head.len() as usize),
-                VSOCK_PKT_HDR_SIZE,
-            )
-            .ok_or(VsockError::GuestMemory)? as *mut u8,
-            buf: Some(
-                get_host_address_range(
-                    desc_chain.memory(),
-                    buf_desc
-                        .addr()
-                        .translate_gva(access_platform, buf_desc.len() as usize),
-                    buf_size,
-                )
+            hdr: get_host_address_range(desc_chain.memory(), head.addr(), VSOCK_PKT_HDR_SIZE)
                 .ok_or(VsockError::GuestMemory)? as *mut u8,
+            buf: Some(
+                get_host_address_range(desc_chain.memory(), buf_desc.addr(), buf_size)
+                    .ok_or(VsockError::GuestMemory)? as *mut u8,
             ),
             buf_size,
         })
@@ -406,7 +380,6 @@ mod tests {
                     .unwrap()
                     .next()
                     .unwrap(),
-                None,
             ) {
                 Err($err) => (),
                 Ok(_) => panic!("Packet assembly should've failed!"),
@@ -437,7 +410,6 @@ mod tests {
                     .unwrap()
                     .next()
                     .unwrap(),
-                None,
             )
             .unwrap();
             assert_eq!(pkt.hdr().len(), VSOCK_PKT_HDR_SIZE);
@@ -475,7 +447,6 @@ mod tests {
                     .unwrap()
                     .next()
                     .unwrap(),
-                None,
             )
             .unwrap();
             assert!(pkt.buf().is_none());
@@ -533,7 +504,6 @@ mod tests {
                     .unwrap()
                     .next()
                     .unwrap(),
-                None,
             )
             .unwrap();
             assert_eq!(pkt.hdr().len(), VSOCK_PKT_HDR_SIZE);
@@ -590,7 +560,6 @@ mod tests {
                 .unwrap()
                 .next()
                 .unwrap(),
-            None,
         )
         .unwrap();
 
@@ -681,7 +650,6 @@ mod tests {
                 .unwrap()
                 .next()
                 .unwrap(),
-            None,
         )
         .unwrap();
 

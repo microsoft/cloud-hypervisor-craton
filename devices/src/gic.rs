@@ -4,34 +4,30 @@
 
 use super::interrupt_controller::{Error, InterruptController};
 extern crate arch;
-use anyhow::anyhow;
-use arch::layout;
-use hypervisor::{arch::aarch64::gic::Vgic, CpuState};
+use arch::aarch64::gic::GicDevice;
 use std::result;
 use std::sync::{Arc, Mutex};
 use vm_device::interrupt::{
     InterruptIndex, InterruptManager, InterruptSourceConfig, InterruptSourceGroup,
     LegacyIrqSourceConfig, MsiIrqGroupConfig,
 };
-use vm_memory::Address;
-use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::eventfd::EventFd;
 
 type Result<T> = result::Result<T, Error>;
 
-// Reserve 32 IRQs for legacy devices.
-pub const IRQ_LEGACY_BASE: usize = layout::IRQ_BASE as usize;
+// Reserve 32 IRQs for legacy device.
+pub const IRQ_LEGACY_BASE: usize = arch::layout::IRQ_BASE as usize;
 pub const IRQ_LEGACY_COUNT: usize = 32;
 
-// Gic (Generic Interupt Controller) struct provides all the functionality of a
-// GIC device. It wraps a hypervisor-emulated GIC device (Vgic) provided by the
-// `hypervisor` crate.
-// Gic struct also implements InterruptController to provide interrupt delivery
-// service.
+// This Gic struct implements InterruptController to provide interrupt delivery service.
+// The Gic source files in arch/ folder maintain the Aarch64 specific Gic device.
+// The 2 Gic instances could be merged together.
+// Leave this refactoring to future. Two options may be considered:
+//   1. Move Gic*.rs from arch/ folder here.
+//   2. Move this file and ioapic.rs to arch/, as they are architecture specific.
 pub struct Gic {
     interrupt_source_group: Arc<dyn InterruptSourceGroup>,
-    // The hypervisor agnostic virtual GIC
-    vgic: Option<Arc<Mutex<dyn Vgic>>>,
+    gic_device: Option<Arc<Mutex<Box<dyn GicDevice>>>>,
 }
 
 impl Gic {
@@ -48,32 +44,16 @@ impl Gic {
 
         Ok(Gic {
             interrupt_source_group,
-            vgic: None,
+            gic_device: None,
         })
     }
 
-    pub fn create_vgic(
-        &mut self,
-        vm: &Arc<dyn hypervisor::Vm>,
-        vcpu_count: u64,
-    ) -> Result<Arc<Mutex<dyn Vgic>>> {
-        let vgic = vm
-            .create_vgic(
-                vcpu_count,
-                layout::GIC_V3_DIST_START.raw_value(),
-                layout::GIC_V3_DIST_SIZE,
-                layout::GIC_V3_REDIST_SIZE,
-                layout::GIC_V3_ITS_SIZE,
-                layout::IRQ_NUM,
-            )
-            .map_err(Error::CreateGic)?;
-        self.vgic = Some(vgic.clone());
-        Ok(vgic.clone())
+    pub fn set_gic_device(&mut self, gic_device: Arc<Mutex<Box<dyn GicDevice>>>) {
+        self.gic_device = Some(gic_device);
     }
 
-    pub fn set_gicr_typers(&mut self, vcpu_states: &[CpuState]) {
-        let vgic = self.vgic.as_ref().unwrap().clone();
-        vgic.lock().unwrap().set_gicr_typers(vcpu_states);
+    pub fn get_gic_device(&self) -> Option<&Arc<Mutex<Box<dyn GicDevice>>>> {
+        self.gic_device.as_ref()
     }
 }
 
@@ -96,7 +76,6 @@ impl InterruptController for Gic {
                 .update(
                     i as InterruptIndex,
                     InterruptSourceConfig::LegacyIrq(config),
-                    false,
                 )
                 .map_err(Error::EnableInterrupt)?;
         }
@@ -117,43 +96,3 @@ impl InterruptController for Gic {
         self.interrupt_source_group.notifier(irq as InterruptIndex)
     }
 }
-
-pub const GIC_V3_ITS_SNAPSHOT_ID: &str = "gic-v3-its";
-impl Snapshottable for Gic {
-    fn id(&self) -> String {
-        GIC_V3_ITS_SNAPSHOT_ID.to_string()
-    }
-
-    fn snapshot(&mut self) -> std::result::Result<Snapshot, MigratableError> {
-        let vgic = self.vgic.as_ref().unwrap().clone();
-        let state = vgic.lock().unwrap().state().unwrap();
-        Snapshot::new_from_state(&self.id(), &state)
-    }
-
-    fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
-        let vgic = self.vgic.as_ref().unwrap().clone();
-        vgic.lock()
-            .unwrap()
-            .set_state(&snapshot.to_state(&self.id())?)
-            .map_err(|e| {
-                MigratableError::Restore(anyhow!("Could not restore GICv3ITS state {:?}", e))
-            })?;
-        Ok(())
-    }
-}
-
-impl Pausable for Gic {
-    fn pause(&mut self) -> std::result::Result<(), MigratableError> {
-        // Flush tables to guest RAM
-        let vgic = self.vgic.as_ref().unwrap().clone();
-        vgic.lock().unwrap().save_data_tables().map_err(|e| {
-            MigratableError::Pause(anyhow!(
-                "Could not save GICv3ITS GIC pending tables {:?}",
-                e
-            ))
-        })?;
-        Ok(())
-    }
-}
-impl Transportable for Gic {}
-impl Migratable for Gic {}

@@ -7,8 +7,8 @@ use super::{Error, Result, DEFAULT_VIRTIO_FEATURES};
 use crate::seccomp_filters::Thread;
 use crate::thread_helper::spawn_virtio_thread;
 use crate::vhost_user::VhostUserCommon;
+use crate::VirtioInterrupt;
 use crate::{GuestMemoryMmap, GuestRegionMmap};
-use crate::{VirtioInterrupt, VIRTIO_F_IOMMU_PLATFORM};
 use block_util::VirtioBlockConfig;
 use seccompiler::SeccompAction;
 use std::mem;
@@ -61,7 +61,6 @@ pub struct Blk {
     epoll_thread: Option<thread::JoinHandle<()>>,
     seccomp_action: SeccompAction,
     exit_evt: EventFd,
-    iommu: bool,
 }
 
 impl Blk {
@@ -72,7 +71,6 @@ impl Blk {
         restoring: bool,
         seccomp_action: SeccompAction,
         exit_evt: EventFd,
-        iommu: bool,
     ) -> Result<Blk> {
         let num_queues = vu_cfg.num_queues;
 
@@ -99,7 +97,6 @@ impl Blk {
                 epoll_thread: None,
                 seccomp_action,
                 exit_evt,
-                iommu,
             });
         }
 
@@ -170,11 +167,7 @@ impl Blk {
                 device_type: VirtioDeviceType::Block as u32,
                 queue_sizes: vec![vu_cfg.queue_size; num_queues],
                 avail_features: acked_features,
-                // If part of the available features that have been acked, the
-                // PROTOCOL_FEATURES bit must be already set through the VIRTIO
-                // acked features as we know the guest would never ack it, thus
-                // the feature would be lost.
-                acked_features: acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits(),
+                acked_features: 0,
                 paused_sync: Some(Arc::new(Barrier::new(2))),
                 min_queues: DEFAULT_QUEUE_NUMBER as u16,
                 ..Default::default()
@@ -192,7 +185,6 @@ impl Blk {
             epoll_thread: None,
             seccomp_action,
             exit_evt,
-            iommu,
         })
     }
 
@@ -245,11 +237,7 @@ impl VirtioDevice for Blk {
     }
 
     fn features(&self) -> u64 {
-        let mut features = self.common.avail_features;
-        if self.iommu {
-            features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
-        }
-        features
+        self.common.avail_features
     }
 
     fn ack_features(&mut self, value: u64) {
@@ -300,6 +288,12 @@ impl VirtioDevice for Blk {
 
         let slave_req_handler: Option<MasterReqHandler<SlaveReqHandler>> = None;
 
+        // The backend acknowledged features must contain the protocol feature
+        // bit in case it was initially set but lost through the features
+        // negotiation with the guest.
+        let backend_acked_features = self.common.acked_features
+            | (self.common.avail_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits());
+
         // Run a dedicated thread for handling potential reconnections with
         // the backend.
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
@@ -309,7 +303,7 @@ impl VirtioDevice for Blk {
             queues,
             queue_evts,
             interrupt_cb,
-            self.common.acked_features,
+            backend_acked_features,
             slave_req_handler,
             kill_evt,
             pause_evt,
@@ -421,10 +415,6 @@ impl Migratable for Blk {
 
     fn dirty_log(&mut self) -> std::result::Result<MemoryRangeTable, MigratableError> {
         self.vu_common.dirty_log(&self.guest_memory)
-    }
-
-    fn start_migration(&mut self) -> std::result::Result<(), MigratableError> {
-        self.vu_common.start_migration()
     }
 
     fn complete_migration(&mut self) -> std::result::Result<(), MigratableError> {

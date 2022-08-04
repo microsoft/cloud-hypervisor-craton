@@ -5,6 +5,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+// This is only used by the tests module from tap.rs, but we cannot use #[macro_use] unless the
+// reference to lazy_static is declared at the root level of the importing crate.
+#[cfg(test)]
+#[macro_use]
+extern crate lazy_static;
 #[macro_use]
 extern crate log;
 
@@ -72,20 +77,9 @@ fn create_sockaddr(ip_addr: net::Ipv4Addr) -> net_gen::sockaddr {
     unsafe { mem::transmute(addr_in) }
 }
 
-fn create_inet_socket() -> Result<net::UdpSocket> {
+fn create_socket() -> Result<net::UdpSocket> {
     // This is safe since we check the return value.
     let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-    if sock < 0 {
-        return Err(Error::CreateSocket(IoError::last_os_error()));
-    }
-
-    // This is safe; nothing else will use or hold onto the raw sock fd.
-    Ok(unsafe { net::UdpSocket::from_raw_fd(sock) })
-}
-
-fn create_unix_socket() -> Result<net::UdpSocket> {
-    // This is safe since we check the return value.
-    let sock = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
     if sock < 0 {
         return Err(Error::CreateSocket(IoError::last_os_error()));
     }

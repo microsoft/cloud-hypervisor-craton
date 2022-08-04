@@ -24,8 +24,6 @@ pub enum Error {
     UpdateInterrupt(io::Error),
     /// Failed enabling the interrupt.
     EnableInterrupt(io::Error),
-    /// Failed creating GIC device.
-    CreateGic(hypervisor::HypervisorVmError),
 }
 
 type Result<T> = result::Result<T, Error>;

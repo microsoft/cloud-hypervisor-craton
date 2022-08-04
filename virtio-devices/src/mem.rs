@@ -38,7 +38,7 @@ use virtio_queue::{DescriptorChain, Queue};
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_memory::{
     Address, ByteValued, Bytes, GuestAddress, GuestMemoryAtomic, GuestMemoryError,
-    GuestMemoryLoadGuard, GuestMemoryRegion,
+    GuestMemoryRegion,
 };
 use vm_migration::protocol::MemoryRangeTable;
 use vm_migration::{
@@ -100,7 +100,6 @@ const RESIZE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
 
-#[cfg(feature = "pci_support")]
 // Virtio features
 const VIRTIO_MEM_F_ACPI_PXM: u8 = 0;
 
@@ -138,8 +137,6 @@ pub enum Error {
     DmaUnmap(std::io::Error),
     // Invalid DMA mapping handler
     InvalidDmaMappingHandler,
-    // Not activated by the guest
-    NotActivatedByGuest,
 }
 
 #[repr(C)]
@@ -280,7 +277,7 @@ struct Request {
 
 impl Request {
     fn parse(
-        desc_chain: &mut DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>,
+        desc_chain: &mut DescriptorChain<GuestMemoryAtomic<GuestMemoryMmap>>,
     ) -> result::Result<Request, Error> {
         let desc = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
         // The descriptor contains the request type which MUST be readable.
@@ -330,7 +327,6 @@ impl Request {
 
 pub struct ResizeSender {
     hotplugged_size: Arc<AtomicU64>,
-    activated: Arc<AtomicBool>,
     tx: mpsc::Sender<Result<(), Error>>,
     evt: EventFd,
 }
@@ -349,7 +345,6 @@ impl Clone for ResizeSender {
     fn clone(&self) -> Self {
         ResizeSender {
             hotplugged_size: self.hotplugged_size.clone(),
-            activated: self.activated.clone(),
             tx: self.tx.clone(),
             evt: self
                 .evt
@@ -361,7 +356,6 @@ impl Clone for ResizeSender {
 
 pub struct Resize {
     hotplugged_size: Arc<AtomicU64>,
-    activated: Arc<AtomicBool>,
     tx: mpsc::Sender<Result<(), Error>>,
     rx: mpsc::Receiver<Result<(), Error>>,
     evt: EventFd,
@@ -373,7 +367,6 @@ impl Resize {
 
         Ok(Resize {
             hotplugged_size: Arc::new(AtomicU64::new(hotplugged_size)),
-            activated: Arc::new(AtomicBool::default()),
             tx,
             rx,
             evt: EventFd::new(EFD_NONBLOCK)?,
@@ -383,17 +376,12 @@ impl Resize {
     pub fn new_resize_sender(&self) -> Result<ResizeSender, Error> {
         Ok(ResizeSender {
             hotplugged_size: self.hotplugged_size.clone(),
-            activated: self.activated.clone(),
             tx: self.tx.clone(),
             evt: self.evt.try_clone().map_err(Error::EventFdTryCloneFail)?,
         })
     }
 
     pub fn work(&self, desired_size: u64) -> Result<(), Error> {
-        if !self.activated.load(Ordering::Acquire) {
-            return Err(Error::NotActivatedByGuest);
-        }
-
         self.hotplugged_size.store(desired_size, Ordering::Release);
         self.evt.write(1).map_err(Error::EventFdWriteFail)?;
         self.rx.recv().map_err(Error::MpscRecvFail)?
@@ -656,11 +644,13 @@ impl MemEpollHandler {
         (resp_type, resp_state)
     }
 
-    fn signal(&self, int_type: VirtioInterruptType) -> result::Result<(), DeviceError> {
-        self.interrupt_cb.trigger(int_type).map_err(|e| {
-            error!("Failed to signal used queue: {:?}", e);
-            DeviceError::FailedSignalingUsedQueue(e)
-        })
+    fn signal(&self, int_type: &VirtioInterruptType) -> result::Result<(), DeviceError> {
+        self.interrupt_cb
+            .trigger(int_type, Some(&self.queue))
+            .map_err(|e| {
+                error!("Failed to signal used queue: {:?}", e);
+                DeviceError::FailedSignalingUsedQueue(e)
+            })
     }
 
     fn process_queue(&mut self) -> bool {
@@ -744,7 +734,7 @@ impl EpollHelperHandler for MemEpollHandler {
                     let mut r = config.resize(size);
                     r = match r {
                         Err(e) => Err(e),
-                        _ => match self.signal(VirtioInterruptType::Config) {
+                        _ => match self.signal(&VirtioInterruptType::Config) {
                             Err(e) => {
                                 signal_error = true;
                                 Err(Error::ResizeTriggerFail(e))
@@ -766,7 +756,7 @@ impl EpollHelperHandler for MemEpollHandler {
                     error!("Failed to get queue event: {:?}", e);
                     return true;
                 } else if self.process_queue() {
-                    if let Err(e) = self.signal(VirtioInterruptType::Queue(0)) {
+                    if let Err(e) = self.signal(&VirtioInterruptType::Queue) {
                         error!("Failed to signal used queue: {:?}", e);
                         return true;
                     }
@@ -819,7 +809,7 @@ impl Mem {
         region: &Arc<GuestRegionMmap>,
         resize: ResizeSender,
         seccomp_action: SeccompAction,
-        #[cfg(feature = "pci_support")] numa_node_id: Option<u16>,
+        numa_node_id: Option<u16>,
         initial_size: u64,
         hugepages: bool,
         exit_evt: EventFd,
@@ -837,10 +827,7 @@ impl Mem {
             ));
         }
 
-        #[cfg(feature = "pci_support")]
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
-        #[cfg(not(feature = "pci_support"))]
-        let avail_features = 1u64 << VIRTIO_F_VERSION_1;
 
         let mut config = VirtioMemConfig {
             block_size: VIRTIO_MEM_DEFAULT_BLOCK_SIZE,
@@ -863,7 +850,7 @@ impl Mem {
                 )
             })?;
         }
-        #[cfg(feature = "pci_support")]
+
         if let Some(node_id) = numa_node_id {
             avail_features |= 1u64 << VIRTIO_MEM_F_ACPI_PXM;
             config.node_id = node_id;
@@ -1061,14 +1048,11 @@ impl VirtioDevice for Mem {
         )?;
         self.common.epoll_threads = Some(epoll_threads);
 
-        self.resize.activated.store(true, Ordering::Release);
-
         event!("virtio-device", "activated", "id", &self.id);
         Ok(())
     }
 
     fn reset(&mut self) -> Option<Arc<dyn VirtioInterrupt>> {
-        self.resize.activated.store(false, Ordering::Release);
         let result = self.common.reset();
         event!("virtio-device", "reset", "id", &self.id);
         result

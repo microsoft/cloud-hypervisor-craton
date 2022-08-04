@@ -8,8 +8,6 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-//#![allow(clippy::significant_drop_in_scrutinee)]
-
 use block_util::{build_disk_image_id, Request, VirtioBlockConfig};
 use libc::EFD_NONBLOCK;
 use log::*;
@@ -25,19 +23,18 @@ use std::path::PathBuf;
 use std::process;
 use std::result;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use std::vec::Vec;
 use std::{convert, error, fmt, io};
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::Listener;
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringState, VringT};
+use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring};
 use virtio_bindings::bindings::virtio_blk::*;
 use virtio_bindings::bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
-use vm_memory::{bitmap::AtomicBitmap, ByteValued, Bytes, GuestMemoryAtomic};
-use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
-
-type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
+use vm_memory::ByteValued;
+use vm_memory::Bytes;
+use vmm_sys_util::eventfd::EventFd;
 
 const SECTOR_SHIFT: u8 = 9;
 const SECTOR_SIZE: u64 = 0x01 << SECTOR_SHIFT;
@@ -47,8 +44,8 @@ const BLK_SIZE: u32 = 512;
 // and the overhead of the emulation layer.
 const POLL_QUEUE_US: u128 = 50;
 
-trait DiskFile: Read + Seek + Write + Send {}
-impl<D: Read + Seek + Write + Send> DiskFile for D {}
+trait DiskFile: Read + Seek + Write + Send + Sync {}
+impl<D: Read + Seek + Write + Send + Sync> DiskFile for D {}
 
 type Result<T> = std::result::Result<T, Error>;
 type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
@@ -114,16 +111,13 @@ impl VhostUserBlkThread {
         })
     }
 
-    fn process_queue(
-        &mut self,
-        vring: &mut RwLockWriteGuard<VringState<GuestMemoryAtomic<GuestMemoryMmap>>>,
-    ) -> bool {
-        let mut used_desc_heads = Vec::new();
+    fn process_queue(&mut self, vring: &mut Vring) -> bool {
+        let mut used_any = false;
 
-        for mut desc_chain in vring.get_queue_mut().iter().unwrap() {
+        while let Some(mut desc_chain) = vring.mut_queue().iter().unwrap().next() {
             debug!("got an element in the queue");
             let len;
-            match Request::parse(&mut desc_chain, None) {
+            match Request::parse(&mut desc_chain) {
                 Ok(mut request) => {
                     debug!("element is a valid request");
                     request.set_writeback(self.writeback.load(Ordering::Acquire));
@@ -153,33 +147,29 @@ impl VhostUserBlkThread {
                 }
             }
 
-            used_desc_heads.push((desc_chain.head_index(), len));
-        }
-
-        let mut needs_signalling = false;
-        for (desc_head, len) in used_desc_heads.iter() {
             if self.event_idx {
-                let queue = vring.get_queue_mut();
-                if queue.add_used(*desc_head, *len).is_ok() {
+                let queue = vring.mut_queue();
+                if queue.add_used(desc_chain.head_index(), len).is_ok() {
                     if queue.needs_notification().unwrap() {
                         debug!("signalling queue");
-                        needs_signalling = true;
+                        vring.signal_used_queue().unwrap();
                     } else {
                         debug!("omitting signal (event_idx)");
                     }
+                    used_any = true;
                 }
             } else {
                 debug!("signalling queue");
-                vring.get_queue_mut().add_used(*desc_head, *len).unwrap();
-                needs_signalling = true;
+                vring
+                    .mut_queue()
+                    .add_used(desc_chain.head_index(), len)
+                    .unwrap();
+                vring.signal_used_queue().unwrap();
+                used_any = true;
             }
         }
 
-        if needs_signalling {
-            vring.signal_used_queue().unwrap();
-        }
-
-        !used_desc_heads.is_empty()
+        used_any
     }
 }
 
@@ -282,9 +272,7 @@ impl VhostUserBlkBackend {
     }
 }
 
-impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, AtomicBitmap>
-    for VhostUserBlkBackend
-{
+impl VhostUserBackend for VhostUserBlkBackend {
     fn num_queues(&self) -> usize {
         self.config.num_queues as usize
     }
@@ -328,13 +316,13 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
     }
 
     fn handle_event(
-        &mut self,
+        &self,
         device_event: u16,
-        evset: EventSet,
-        vrings: &[VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>],
+        evset: epoll::Events,
+        vrings: &[Arc<RwLock<Vring>>],
         thread_id: usize,
     ) -> VhostUserBackendResult<bool> {
-        if evset != EventSet::IN {
+        if evset != epoll::Events::EPOLLIN {
             return Err(Error::HandleEventNotEpollIn.into());
         }
 
@@ -343,7 +331,7 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
         let mut thread = self.threads[thread_id].lock().unwrap();
         match device_event {
             0 => {
-                let mut vring = vrings[0].get_mut();
+                let mut vring = vrings[0].write().unwrap();
 
                 if self.poll_queue {
                     // Actively poll the queue until POLL_QUEUE_US has passed
@@ -364,7 +352,7 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
                     // calling process_queue() until it stops finding new
                     // requests on the queue.
                     loop {
-                        vring.get_queue_mut().enable_notification().unwrap();
+                        vring.mut_queue().enable_notification().unwrap();
                         if !thread.process_queue(&mut vring) {
                             break;
                         }
@@ -398,26 +386,21 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
         Ok(())
     }
 
-    fn exit_event(&self, thread_index: usize) -> Option<EventFd> {
-        Some(
+    fn exit_event(&self, thread_index: usize) -> Option<(EventFd, Option<u16>)> {
+        // The exit event is placed after the queue, which is event index 1.
+        Some((
             self.threads[thread_index]
                 .lock()
                 .unwrap()
                 .kill_evt
                 .try_clone()
                 .unwrap(),
-        )
+            Some(1),
+        ))
     }
 
     fn queues_per_thread(&self) -> Vec<u64> {
         self.queues_per_thread.clone()
-    }
-
-    fn update_memory(
-        &mut self,
-        _mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> VhostUserBackendResult<()> {
-        Ok(())
     }
 }
 
@@ -508,16 +491,11 @@ pub fn start_block_backend(backend_command: &str) {
     let listener = Listener::new(&backend_config.socket, true).unwrap();
 
     let name = "vhost-user-blk-backend";
-    let mut blk_daemon = VhostUserDaemon::new(
-        name.to_string(),
-        blk_backend.clone(),
-        GuestMemoryAtomic::new(GuestMemoryMmap::new()),
-    )
-    .unwrap();
+    let mut blk_daemon = VhostUserDaemon::new(name.to_string(), blk_backend.clone()).unwrap();
 
     debug!("blk_daemon is created!\n");
 
-    if let Err(e) = blk_daemon.start(listener) {
+    if let Err(e) = blk_daemon.start_server(listener) {
         error!(
             "Failed to start daemon for vhost-user-block with error: {:?}\n",
             e

@@ -10,7 +10,6 @@ use crate::{read_le_u32, write_le_u32};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Barrier};
-use std::time::Instant;
 use std::{io, result};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
@@ -35,7 +34,6 @@ const UARTRIS: u64 = 15;
 const UARTMIS: u64 = 16;
 const UARTICR: u64 = 17;
 const UARTDMACR: u64 = 18;
-const UARTDEBUG: u64 = 0x3c0;
 
 const PL011_INT_TX: u32 = 0x20;
 const PL011_INT_RX: u32 = 0x10;
@@ -79,7 +77,6 @@ pub struct Pl011 {
     rsr: u32,
     cr: u32,
     dmacr: u32,
-    debug: u32,
     int_enabled: u32,
     int_level: u32,
     read_fifo: VecDeque<u8>,
@@ -91,7 +88,6 @@ pub struct Pl011 {
     read_trigger: u32,
     irq: Arc<dyn InterruptSourceGroup>,
     out: Option<Box<dyn io::Write + Send>>,
-    timestamp: std::time::Instant,
 }
 
 #[derive(Versionize)]
@@ -101,7 +97,6 @@ pub struct Pl011State {
     rsr: u32,
     cr: u32,
     dmacr: u32,
-    debug: u32,
     int_enabled: u32,
     int_level: u32,
     read_fifo: Vec<u8>,
@@ -121,7 +116,6 @@ impl Pl011 {
         id: String,
         irq: Arc<dyn InterruptSourceGroup>,
         out: Option<Box<dyn io::Write + Send>>,
-        timestamp: Instant,
     ) -> Self {
         Self {
             id,
@@ -130,7 +124,6 @@ impl Pl011 {
             rsr: 0u32,
             cr: 0x300u32,
             dmacr: 0u32,
-            debug: 0u32,
             int_enabled: 0u32,
             int_level: 0u32,
             read_fifo: VecDeque::new(),
@@ -142,7 +135,6 @@ impl Pl011 {
             read_trigger: 1u32,
             irq,
             out,
-            timestamp,
         }
     }
 
@@ -157,7 +149,6 @@ impl Pl011 {
             rsr: self.rsr,
             cr: self.cr,
             dmacr: self.dmacr,
-            debug: self.debug,
             int_enabled: self.int_enabled,
             int_level: self.int_level,
             read_fifo: self.read_fifo.clone().into(),
@@ -176,7 +167,6 @@ impl Pl011 {
         self.rsr = state.rsr;
         self.cr = state.cr;
         self.dmacr = state.dmacr;
-        self.debug = state.debug;
         self.int_enabled = state.int_enabled;
         self.int_level = state.int_level;
         self.read_fifo = state.read_fifo.clone().into();
@@ -290,48 +280,11 @@ impl Pl011 {
                     return Err(Error::DmaNotImplemented);
                 }
             }
-            UARTDEBUG => {
-                self.debug = val;
-                self.handle_debug();
-            }
             off => {
-                debug!("PL011: Bad write offset, offset: {}", off);
                 return Err(Error::BadWriteOffset(off));
             }
         }
         Ok(())
-    }
-
-    fn handle_debug(&self) {
-        let elapsed = self.timestamp.elapsed();
-
-        match self.debug {
-            0x00..=0x1f => info!(
-                "[Debug I/O port: Firmware code: 0x{:x}] {}.{:>06} seconds",
-                self.debug,
-                elapsed.as_secs(),
-                elapsed.as_micros()
-            ),
-            0x20..=0x3f => info!(
-                "[Debug I/O port: Bootloader code: 0x{:x}] {}.{:>06} seconds",
-                self.debug,
-                elapsed.as_secs(),
-                elapsed.as_micros()
-            ),
-            0x40..=0x5f => info!(
-                "[Debug I/O port: Kernel code: 0x{:x}] {}.{:>06} seconds",
-                self.debug,
-                elapsed.as_secs(),
-                elapsed.as_micros()
-            ),
-            0x60..=0x7f => info!(
-                "[Debug I/O port: Userspace code: 0x{:x}] {}.{:>06} seconds",
-                self.debug,
-                elapsed.as_secs(),
-                elapsed.as_micros()
-            ),
-            _ => {}
-        }
     }
 
     fn trigger_interrupt(&mut self) -> result::Result<(), io::Error> {
@@ -341,15 +294,19 @@ impl Pl011 {
 
 impl BusDevice for Pl011 {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
+        let v;
         let mut read_ok = true;
-        let v = if (AMBA_ID_LOW..AMBA_ID_HIGH).contains(&(offset >> 2)) {
+        if (AMBA_ID_LOW..AMBA_ID_HIGH).contains(&(offset >> 2)) {
             let index = ((offset - 0xfe0) >> 2) as usize;
-            u32::from(PL011_ID[index])
+            v = u32::from(PL011_ID[index]);
         } else {
-            match offset >> 2 {
+            v = match offset >> 2 {
                 UARTDR => {
+                    let c: u32;
+                    let r: u32;
+
                     self.flags &= !PL011_FLAG_RXFF;
-                    let c: u32 = self.read_fifo.pop_front().unwrap_or_default().into();
+                    c = self.read_fifo.pop_front().unwrap_or_default().into();
                     if self.read_count > 0 {
                         self.read_count -= 1;
                     }
@@ -360,7 +317,8 @@ impl BusDevice for Pl011 {
                         self.int_level &= !PL011_INT_RX;
                     }
                     self.rsr = c >> 8;
-                    c
+                    r = c;
+                    r
                 }
                 UARTRSR_UARTECR => self.rsr,
                 UARTFR => self.flags,
@@ -374,13 +332,12 @@ impl BusDevice for Pl011 {
                 UARTRIS => self.int_level,
                 UARTMIS => (self.int_level & self.int_enabled),
                 UARTDMACR => self.dmacr,
-                UARTDEBUG => self.debug,
                 _ => {
                     read_ok = false;
                     0
                 }
             }
-        };
+        }
 
         if read_ok && data.len() <= 4 {
             write_le_u32(data, v);
@@ -452,7 +409,6 @@ mod tests {
             &self,
             _index: InterruptIndex,
             _config: InterruptSourceConfig,
-            _masked: bool,
         ) -> result::Result<(), std::io::Error> {
             Ok(())
         }
@@ -497,7 +453,6 @@ mod tests {
             String::from(SERIAL_NAME),
             Arc::new(TestInterrupt::new(intr_evt.try_clone().unwrap())),
             Some(Box::new(pl011_out.clone())),
-            Instant::now(),
         );
 
         pl011.write(0, UARTDR as u64, &[b'x', b'y']);
@@ -518,7 +473,6 @@ mod tests {
             String::from(SERIAL_NAME),
             Arc::new(TestInterrupt::new(intr_evt.try_clone().unwrap())),
             Some(Box::new(pl011_out)),
-            Instant::now(),
         );
 
         // write 1 to the interrupt event fd, so that read doesn't block in case the event fd

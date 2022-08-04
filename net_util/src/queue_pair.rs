@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use virtio_queue::Queue;
 use vm_memory::{Bytes, GuestMemory, GuestMemoryAtomic};
-use vm_virtio::{AccessPlatform, Translatable};
 
 #[derive(Clone)]
 pub struct TxVirtio {
@@ -39,7 +38,6 @@ impl TxVirtio {
         tap: &mut Tap,
         queue: &mut Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
         rate_limiter: &mut Option<RateLimiter>,
-        access_platform: Option<&Arc<dyn AccessPlatform>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut retry_write = false;
         let mut rate_limit_reached = false;
@@ -60,13 +58,10 @@ impl TxVirtio {
 
                 let mut iovecs = Vec::new();
                 while let Some(desc) = next_desc {
-                    let desc_addr = desc
-                        .addr()
-                        .translate_gva(access_platform, desc.len() as usize);
                     if !desc.is_write_only() && desc.len() > 0 {
                         let buf = desc_chain
                             .memory()
-                            .get_slice(desc_addr, desc.len() as usize)
+                            .get_slice(desc.addr(), desc.len() as usize)
                             .map_err(NetQueuePairError::GuestMemory)?
                             .as_ptr();
                         let iovec = libc::iovec {
@@ -74,14 +69,6 @@ impl TxVirtio {
                             iov_len: desc.len() as libc::size_t,
                         };
                         iovecs.push(iovec);
-                    } else {
-                        error!(
-                            "Invalid descriptor chain: address = 0x{:x} length = {} write_only = {}",
-                            desc_addr.0,
-                            desc.len(),
-                            desc.is_write_only()
-                        );
-                        return Err(NetQueuePairError::DescriptorChainInvalid);
                     }
                     next_desc = desc_chain.next();
                 }
@@ -132,12 +119,9 @@ impl TxVirtio {
             queue
                 .add_used(used_desc_head.0, used_desc_head.1)
                 .map_err(NetQueuePairError::QueueAddUsed)?;
-            if !queue
+            queue
                 .enable_notification()
-                .map_err(NetQueuePairError::QueueEnableNotification)?
-            {
-                break;
-            }
+                .map_err(NetQueuePairError::QueueEnableNotification)?;
         }
 
         Ok(retry_write)
@@ -169,7 +153,6 @@ impl RxVirtio {
         tap: &mut Tap,
         queue: &mut Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
         rate_limiter: &mut Option<RateLimiter>,
-        access_platform: Option<&Arc<dyn AccessPlatform>>,
     ) -> Result<bool, NetQueuePairError> {
         let mut exhausted_descs = true;
         let mut rate_limit_reached = false;
@@ -190,26 +173,15 @@ impl RxVirtio {
                 let desc = desc_chain
                     .next()
                     .ok_or(NetQueuePairError::DescriptorChainTooShort)?;
-
-                let num_buffers_addr = desc_chain
-                    .memory()
-                    .checked_offset(
-                        desc.addr()
-                            .translate_gva(access_platform, desc.len() as usize),
-                        10,
-                    )
-                    .unwrap();
+                let num_buffers_addr = desc_chain.memory().checked_offset(desc.addr(), 10).unwrap();
                 let mut next_desc = Some(desc);
 
                 let mut iovecs = Vec::new();
                 while let Some(desc) = next_desc {
-                    let desc_addr = desc
-                        .addr()
-                        .translate_gva(access_platform, desc.len() as usize);
                     if desc.is_write_only() && desc.len() > 0 {
                         let buf = desc_chain
                             .memory()
-                            .get_slice(desc_addr, desc.len() as usize)
+                            .get_slice(desc.addr(), desc.len() as usize)
                             .map_err(NetQueuePairError::GuestMemory)?
                             .as_ptr();
                         let iovec = libc::iovec {
@@ -217,14 +189,6 @@ impl RxVirtio {
                             iov_len: desc.len() as libc::size_t,
                         };
                         iovecs.push(iovec);
-                    } else {
-                        error!(
-                            "Invalid descriptor chain: address = 0x{:x} length = {} write_only = {}",
-                            desc_addr.0,
-                            desc.len(),
-                            desc.is_write_only()
-                        );
-                        return Err(NetQueuePairError::DescriptorChainInvalid);
                     }
                     next_desc = desc_chain.next();
                 }
@@ -283,12 +247,9 @@ impl RxVirtio {
             queue
                 .add_used(used_desc_head.0, used_desc_head.1)
                 .map_err(NetQueuePairError::QueueAddUsed)?;
-            if !queue
+            queue
                 .enable_notification()
-                .map_err(NetQueuePairError::QueueEnableNotification)?
-            {
-                break;
-            }
+                .map_err(NetQueuePairError::QueueEnableNotification)?;
         }
 
         Ok(exhausted_descs)
@@ -321,8 +282,6 @@ pub enum NetQueuePairError {
     QueueIteratorFailed(virtio_queue::Error),
     /// Descriptor chain is too short
     DescriptorChainTooShort,
-    /// Descriptor chain does not contain valid descriptors
-    DescriptorChainInvalid,
     /// Failed to determine if queue needed notification
     QueueNeedsNotification(virtio_queue::Error),
     /// Failed to enable notification on the queue
@@ -349,7 +308,6 @@ pub struct NetQueuePair {
     pub rx_desc_avail: bool,
     pub rx_rate_limiter: Option<RateLimiter>,
     pub tx_rate_limiter: Option<RateLimiter>,
-    pub access_platform: Option<Arc<dyn AccessPlatform>>,
 }
 
 impl NetQueuePair {
@@ -357,12 +315,9 @@ impl NetQueuePair {
         &mut self,
         queue: &mut Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
     ) -> Result<bool, NetQueuePairError> {
-        let tx_tap_retry = self.tx.process_desc_chain(
-            &mut self.tap,
-            queue,
-            &mut self.tx_rate_limiter,
-            self.access_platform.as_ref(),
-        )?;
+        let tx_tap_retry =
+            self.tx
+                .process_desc_chain(&mut self.tap, queue, &mut self.tx_rate_limiter)?;
 
         // We got told to try again when writing to the tap. Wait for the TAP to be writable
         if tx_tap_retry && !self.tx_tap_listening {
@@ -405,12 +360,10 @@ impl NetQueuePair {
         &mut self,
         queue: &mut Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
     ) -> Result<bool, NetQueuePairError> {
-        self.rx_desc_avail = !self.rx.process_desc_chain(
-            &mut self.tap,
-            queue,
-            &mut self.rx_rate_limiter,
-            self.access_platform.as_ref(),
-        )?;
+        self.rx_desc_avail =
+            !self
+                .rx
+                .process_desc_chain(&mut self.tap, queue, &mut self.rx_rate_limiter)?;
         let rate_limit_reached = self
             .rx_rate_limiter
             .as_ref()

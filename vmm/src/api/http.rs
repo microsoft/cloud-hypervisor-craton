@@ -6,9 +6,8 @@
 use crate::api::http_endpoint::{VmActionHandler, VmCreate, VmInfo, VmmPing, VmmShutdown};
 use crate::api::{ApiError, ApiRequest, VmAction};
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
-use crate::{Error as VmmError, Result};
+use crate::{Error, Result};
 use micro_http::{Body, HttpServer, MediaType, Method, Request, Response, StatusCode, Version};
-use once_cell::sync::Lazy;
 use seccompiler::{apply_filter, SeccompAction};
 use serde_json::Error as SerdeError;
 use std::collections::HashMap;
@@ -37,8 +36,86 @@ pub enum HttpError {
     /// Internal Server Error
     InternalServerError,
 
-    /// Error from internal API
-    ApiError(ApiError),
+    /// Could not create a VM
+    VmCreate(ApiError),
+
+    /// Could not boot a VM
+    VmBoot(ApiError),
+
+    /// Could not delete a VM
+    VmDelete(ApiError),
+
+    /// Could not get the VM information
+    VmInfo(ApiError),
+
+    /// Could not pause the VM
+    VmPause(ApiError),
+
+    /// Could not pause the VM
+    VmResume(ApiError),
+
+    /// Could not shut a VM down
+    VmShutdown(ApiError),
+
+    /// Could not reboot a VM
+    VmReboot(ApiError),
+
+    /// Could not snapshot a VM
+    VmSnapshot(ApiError),
+
+    /// Could not restore a VM
+    VmRestore(ApiError),
+
+    /// Could not act on a VM
+    VmAction(ApiError),
+
+    /// Could not resize a VM
+    VmResize(ApiError),
+
+    /// Could not resize a memory zone
+    VmResizeZone(ApiError),
+
+    /// Could not add a device to a VM
+    VmAddDevice(ApiError),
+
+    /// Could not add a user device to the VM
+    VmAddUserDevice(ApiError),
+
+    /// Could not remove a device from a VM
+    VmRemoveDevice(ApiError),
+
+    /// Could not shut the VMM down
+    VmmShutdown(ApiError),
+
+    /// Could not handle VMM ping
+    VmmPing(ApiError),
+
+    /// Could not add a disk to a VM
+    VmAddDisk(ApiError),
+
+    /// Could not add a fs to a VM
+    VmAddFs(ApiError),
+
+    /// Could not add a pmem device to a VM
+    VmAddPmem(ApiError),
+
+    /// Could not add a network device to a VM
+    VmAddNet(ApiError),
+
+    /// Could not add a vsock device to a VM
+    VmAddVsock(ApiError),
+
+    /// Could not get counters from VM
+    VmCounters(ApiError),
+
+    /// Error setting up migration received
+    VmReceiveMigration(ApiError),
+
+    /// Error setting up migration sender
+    VmSendMigration(ApiError),
+
+    /// Error activating power button
+    VmPowerButton(ApiError),
 }
 
 impl From<serde_json::Error> for HttpError {
@@ -57,7 +134,7 @@ pub fn error_response(error: HttpError, status: StatusCode) -> Response {
 }
 
 /// An HTTP endpoint handler interface
-pub trait EndpointHandler {
+pub trait EndpointHandler: Sync + Send {
     /// Handles an HTTP request.
     /// After parsing the request, the handler could decide to send an
     /// associated API request down to the VMM API server to e.g. create
@@ -69,13 +146,9 @@ pub trait EndpointHandler {
         api_notifier: EventFd,
         api_sender: Sender<ApiRequest>,
     ) -> Response {
-        // Cloning the files here is very important as it dup() the file
-        // descriptors, leaving open the one that was received. This way,
-        // rebooting the VM will work since the VM will be created from the
-        // original file descriptors.
-        let files = req.files.iter().map(|f| f.try_clone().unwrap()).collect();
+        let file = req.file.as_ref().map(|f| f.try_clone().unwrap());
         let res = match req.method() {
-            Method::Put => self.put_handler(api_notifier, api_sender, &req.body, files),
+            Method::Put => self.put_handler(api_notifier, api_sender, &req.body, file),
             Method::Get => self.get_handler(api_notifier, api_sender, &req.body),
             _ => return Response::new(Version::Http11, StatusCode::BadRequest),
         };
@@ -103,7 +176,7 @@ pub trait EndpointHandler {
         _api_notifier: EventFd,
         _api_sender: Sender<ApiRequest>,
         _body: &Option<Body>,
-        _files: Vec<File>,
+        _file: Option<File>,
     ) -> std::result::Result<Option<Body>, HttpError> {
         Err(HttpError::BadRequest)
     }
@@ -130,125 +203,43 @@ macro_rules! endpoint {
     };
 }
 
-/// HTTP_ROUTES contain all the cloud-hypervisor HTTP routes.
-pub static HTTP_ROUTES: Lazy<HttpRoutes> = Lazy::new(|| {
-    let mut r = HttpRoutes {
-        routes: HashMap::new(),
+lazy_static! {
+    /// HTTP_ROUTES contain all the cloud-hypervisor HTTP routes.
+    pub static ref HTTP_ROUTES: HttpRoutes = {
+        let mut r = HttpRoutes {
+            routes: HashMap::new(),
+        };
+
+        r.routes.insert(endpoint!("/vm.add-device"), Box::new(VmActionHandler::new(VmAction::AddDevice(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.add-user-device"), Box::new(VmActionHandler::new(VmAction::AddUserDevice(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.add-disk"), Box::new(VmActionHandler::new(VmAction::AddDisk(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.add-fs"), Box::new(VmActionHandler::new(VmAction::AddFs(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.add-net"), Box::new(VmActionHandler::new(VmAction::AddNet(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.add-pmem"), Box::new(VmActionHandler::new(VmAction::AddPmem(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.add-vsock"), Box::new(VmActionHandler::new(VmAction::AddVsock(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.boot"), Box::new(VmActionHandler::new(VmAction::Boot)));
+        r.routes.insert(endpoint!("/vm.counters"), Box::new(VmActionHandler::new(VmAction::Counters)));
+        r.routes.insert(endpoint!("/vm.create"), Box::new(VmCreate {}));
+        r.routes.insert(endpoint!("/vm.delete"), Box::new(VmActionHandler::new(VmAction::Delete)));
+        r.routes.insert(endpoint!("/vm.info"), Box::new(VmInfo {}));
+        r.routes.insert(endpoint!("/vm.pause"), Box::new(VmActionHandler::new(VmAction::Pause)));
+        r.routes.insert(endpoint!("/vm.power-button"), Box::new(VmActionHandler::new(VmAction::PowerButton)));
+        r.routes.insert(endpoint!("/vm.reboot"), Box::new(VmActionHandler::new(VmAction::Reboot)));
+        r.routes.insert(endpoint!("/vm.receive-migration"), Box::new(VmActionHandler::new(VmAction::ReceiveMigration(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.remove-device"), Box::new(VmActionHandler::new(VmAction::RemoveDevice(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.resize"), Box::new(VmActionHandler::new(VmAction::Resize(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.resize-zone"), Box::new(VmActionHandler::new(VmAction::ResizeZone(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.restore"), Box::new(VmActionHandler::new(VmAction::Restore(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.resume"), Box::new(VmActionHandler::new(VmAction::Resume)));
+        r.routes.insert(endpoint!("/vm.send-migration"), Box::new(VmActionHandler::new(VmAction::SendMigration(Arc::default()))));
+        r.routes.insert(endpoint!("/vm.shutdown"), Box::new(VmActionHandler::new(VmAction::Shutdown)));
+        r.routes.insert(endpoint!("/vm.snapshot"), Box::new(VmActionHandler::new(VmAction::Snapshot(Arc::default()))));
+        r.routes.insert(endpoint!("/vmm.ping"), Box::new(VmmPing {}));
+        r.routes.insert(endpoint!("/vmm.shutdown"), Box::new(VmmShutdown {}));
+
+        r
     };
-
-    r.routes.insert(
-        endpoint!("/vm.add-device"),
-        Box::new(VmActionHandler::new(VmAction::AddDevice(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.add-user-device"),
-        Box::new(VmActionHandler::new(
-            VmAction::AddUserDevice(Arc::default()),
-        )),
-    );
-    r.routes.insert(
-        endpoint!("/vm.add-disk"),
-        Box::new(VmActionHandler::new(VmAction::AddDisk(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.add-fs"),
-        Box::new(VmActionHandler::new(VmAction::AddFs(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.add-net"),
-        Box::new(VmActionHandler::new(VmAction::AddNet(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.add-pmem"),
-        Box::new(VmActionHandler::new(VmAction::AddPmem(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.add-vdpa"),
-        Box::new(VmActionHandler::new(VmAction::AddVdpa(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.add-vsock"),
-        Box::new(VmActionHandler::new(VmAction::AddVsock(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.boot"),
-        Box::new(VmActionHandler::new(VmAction::Boot)),
-    );
-    r.routes.insert(
-        endpoint!("/vm.counters"),
-        Box::new(VmActionHandler::new(VmAction::Counters)),
-    );
-    r.routes
-        .insert(endpoint!("/vm.create"), Box::new(VmCreate {}));
-    r.routes.insert(
-        endpoint!("/vm.delete"),
-        Box::new(VmActionHandler::new(VmAction::Delete)),
-    );
-    r.routes.insert(endpoint!("/vm.info"), Box::new(VmInfo {}));
-    r.routes.insert(
-        endpoint!("/vm.pause"),
-        Box::new(VmActionHandler::new(VmAction::Pause)),
-    );
-    r.routes.insert(
-        endpoint!("/vm.power-button"),
-        Box::new(VmActionHandler::new(VmAction::PowerButton)),
-    );
-    r.routes.insert(
-        endpoint!("/vm.reboot"),
-        Box::new(VmActionHandler::new(VmAction::Reboot)),
-    );
-    r.routes.insert(
-        endpoint!("/vm.receive-migration"),
-        Box::new(VmActionHandler::new(VmAction::ReceiveMigration(
-            Arc::default(),
-        ))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.remove-device"),
-        Box::new(VmActionHandler::new(VmAction::RemoveDevice(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.resize"),
-        Box::new(VmActionHandler::new(VmAction::Resize(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.resize-zone"),
-        Box::new(VmActionHandler::new(VmAction::ResizeZone(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.restore"),
-        Box::new(VmActionHandler::new(VmAction::Restore(Arc::default()))),
-    );
-    r.routes.insert(
-        endpoint!("/vm.resume"),
-        Box::new(VmActionHandler::new(VmAction::Resume)),
-    );
-    r.routes.insert(
-        endpoint!("/vm.send-migration"),
-        Box::new(VmActionHandler::new(
-            VmAction::SendMigration(Arc::default()),
-        )),
-    );
-    r.routes.insert(
-        endpoint!("/vm.shutdown"),
-        Box::new(VmActionHandler::new(VmAction::Shutdown)),
-    );
-    r.routes.insert(
-        endpoint!("/vm.snapshot"),
-        Box::new(VmActionHandler::new(VmAction::Snapshot(Arc::default()))),
-    );
-    #[cfg(feature = "guest_debug")]
-    r.routes.insert(
-        endpoint!("/vm.coredump"),
-        Box::new(VmActionHandler::new(VmAction::Coredump(Arc::default()))),
-    );
-    r.routes
-        .insert(endpoint!("/vmm.ping"), Box::new(VmmPing {}));
-    r.routes
-        .insert(endpoint!("/vmm.shutdown"), Box::new(VmmShutdown {}));
-
-    r
-});
+}
 
 fn handle_http_request(
     request: &Request,
@@ -281,7 +272,7 @@ fn start_http_thread(
 ) -> Result<thread::JoinHandle<Result<()>>> {
     // Retrieve seccomp filter for API thread
     let api_seccomp_filter =
-        get_seccomp_filter(seccomp_action, Thread::Api).map_err(VmmError::CreateSeccompFilter)?;
+        get_seccomp_filter(seccomp_action, Thread::Api).map_err(Error::CreateSeccompFilter)?;
 
     thread::Builder::new()
         .name("http-server".to_string())
@@ -289,7 +280,7 @@ fn start_http_thread(
             // Apply seccomp filter for API thread.
             if !api_seccomp_filter.is_empty() {
                 apply_filter(&api_seccomp_filter)
-                    .map_err(VmmError::ApplySeccompFilter)
+                    .map_err(Error::ApplySeccompFilter)
                     .map_err(|e| {
                         error!("Error applying seccomp filter: {:?}", e);
                         exit_evt.write(1).ok();
@@ -327,7 +318,7 @@ fn start_http_thread(
 
             Ok(())
         })
-        .map_err(VmmError::HttpThreadSpawn)
+        .map_err(Error::HttpThreadSpawn)
 }
 
 pub fn start_http_path_thread(
@@ -337,10 +328,11 @@ pub fn start_http_path_thread(
     seccomp_action: &SeccompAction,
     exit_evt: EventFd,
 ) -> Result<thread::JoinHandle<Result<()>>> {
+    std::fs::remove_file(path).unwrap_or_default();
     let socket_path = PathBuf::from(path);
-    let socket_fd = UnixListener::bind(socket_path).map_err(VmmError::CreateApiServerSocket)?;
+    let socket_fd = UnixListener::bind(socket_path).map_err(Error::CreateApiServerSocket)?;
     let server =
-        HttpServer::new_from_fd(socket_fd.into_raw_fd()).map_err(VmmError::CreateApiServer)?;
+        HttpServer::new_from_fd(socket_fd.into_raw_fd()).map_err(Error::CreateApiServer)?;
     start_http_thread(server, api_notifier, api_sender, seccomp_action, exit_evt)
 }
 
@@ -351,6 +343,6 @@ pub fn start_http_fd_thread(
     seccomp_action: &SeccompAction,
     exit_evt: EventFd,
 ) -> Result<thread::JoinHandle<Result<()>>> {
-    let server = HttpServer::new_from_fd(fd).map_err(VmmError::CreateApiServer)?;
+    let server = HttpServer::new_from_fd(fd).map_err(Error::CreateApiServer)?;
     start_http_thread(server, api_notifier, api_sender, seccomp_action, exit_evt)
 }

@@ -6,8 +6,6 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-//#![allow(clippy::significant_drop_in_scrutinee)]
-
 use libc::{self, EFD_NONBLOCK};
 use log::*;
 use net_util::{
@@ -18,18 +16,15 @@ use option_parser::{OptionParser, OptionParserError};
 use std::fmt;
 use std::io::{self};
 use std::net::Ipv4Addr;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use std::process;
 use std::sync::{Arc, Mutex, RwLock};
 use std::vec::Vec;
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::Listener;
-use vhost_user_backend::{VhostUserBackendMut, VhostUserDaemon, VringRwLock, VringT};
+use vhost_user_backend::{VhostUserBackend, VhostUserDaemon, Vring, VringWorker};
 use virtio_bindings::bindings::virtio_net::*;
-use vm_memory::{bitmap::AtomicBitmap, GuestMemoryAtomic};
-use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
-
-type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;
+use vmm_sys_util::eventfd::EventFd;
 
 pub type Result<T> = std::result::Result<T, Error>;
 type VhostUserBackendResult<T> = std::result::Result<T, std::io::Error>;
@@ -93,18 +88,17 @@ impl VhostUserNetThread {
                 tx_tap_listening: false,
                 epoll_fd: None,
                 counters: NetCounters::default(),
-                tap_rx_event_id: 3,
-                tap_tx_event_id: 4,
+                tap_rx_event_id: 2,
+                tap_tx_event_id: 3,
                 rx_desc_avail: false,
                 rx_rate_limiter: None,
                 tx_rate_limiter: None,
-                access_platform: None,
             },
         })
     }
 
-    pub fn set_epoll_fd(&mut self, fd: RawFd) {
-        self.net.epoll_fd = Some(fd);
+    pub fn set_vring_worker(&mut self, vring_worker: Option<Arc<VringWorker>>) {
+        self.net.epoll_fd = Some(vring_worker.as_ref().unwrap().as_raw_fd());
     }
 }
 
@@ -151,9 +145,7 @@ impl VhostUserNetBackend {
     }
 }
 
-impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, AtomicBitmap>
-    for VhostUserNetBackend
-{
+impl VhostUserBackend for VhostUserNetBackend {
     fn num_queues(&self) -> usize {
         self.num_queues
     }
@@ -173,6 +165,7 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
             | 1 << VIRTIO_NET_F_HOST_TSO6
             | 1 << VIRTIO_NET_F_HOST_ECN
             | 1 << VIRTIO_NET_F_HOST_UFO
+            | 1 << VIRTIO_NET_F_MRG_RXBUF
             | 1 << VIRTIO_NET_F_CTRL_VQ
             | 1 << VIRTIO_NET_F_MQ
             | 1 << VIRTIO_NET_F_MAC
@@ -190,10 +183,10 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
     fn set_event_idx(&mut self, _enabled: bool) {}
 
     fn handle_event(
-        &mut self,
+        &self,
         device_event: u16,
-        _evset: EventSet,
-        vrings: &[VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>],
+        _evset: epoll::Events,
+        vrings: &[Arc<RwLock<Vring>>],
         thread_id: usize,
     ) -> VhostUserBackendResult<bool> {
         let mut thread = self.threads[thread_id].lock().unwrap();
@@ -210,11 +203,11 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
                     thread.net.rx_tap_listening = true;
                 }
             }
-            1 | 4 => {
-                let mut vring = vrings[1].get_mut();
+            1 | 3 => {
+                let mut vring = vrings[1].write().unwrap();
                 if thread
                     .net
-                    .process_tx(vring.get_queue_mut())
+                    .process_tx(vring.mut_queue())
                     .map_err(Error::NetQueuePair)?
                 {
                     vring
@@ -222,11 +215,11 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
                         .map_err(Error::FailedSignalingUsedQueue)?
                 }
             }
-            3 => {
-                let mut vring = vrings[0].get_mut();
+            2 => {
+                let mut vring = vrings[0].write().unwrap();
                 if thread
                     .net
-                    .process_rx(vring.get_queue_mut())
+                    .process_rx(vring.mut_queue())
                     .map_err(Error::NetQueuePair)?
                 {
                     vring
@@ -240,26 +233,22 @@ impl VhostUserBackendMut<VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>, Atomic
         Ok(false)
     }
 
-    fn exit_event(&self, thread_index: usize) -> Option<EventFd> {
-        Some(
+    fn exit_event(&self, thread_index: usize) -> Option<(EventFd, Option<u16>)> {
+        // The exit event is placed after the queues and the tap event, which
+        // is event index 3.
+        Some((
             self.threads[thread_index]
                 .lock()
                 .unwrap()
                 .kill_evt
                 .try_clone()
                 .unwrap(),
-        )
+            Some(3),
+        ))
     }
 
     fn queues_per_thread(&self) -> Vec<u64> {
         self.queues_per_thread.clone()
-    }
-
-    fn update_memory(
-        &mut self,
-        _mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    ) -> VhostUserBackendResult<()> {
-        Ok(())
     }
 }
 
@@ -354,30 +343,27 @@ pub fn start_net_backend(backend_command: &str) {
         .unwrap(),
     ));
 
-    let mut net_daemon = VhostUserDaemon::new(
-        "vhost-user-net-backend".to_string(),
-        net_backend.clone(),
-        GuestMemoryAtomic::new(GuestMemoryMmap::new()),
-    )
-    .unwrap();
+    let mut net_daemon =
+        VhostUserDaemon::new("vhost-user-net-backend".to_string(), net_backend.clone()).unwrap();
 
-    let epoll_handlers = net_daemon.get_epoll_handlers();
-    if epoll_handlers.len() != net_backend.read().unwrap().threads.len() {
+    let mut vring_workers = net_daemon.get_vring_workers();
+
+    if vring_workers.len() != net_backend.read().unwrap().threads.len() {
         error!("Number of vring workers must be identical to the number of backend threads");
         process::exit(1);
     }
 
-    for (index, thread) in net_backend.read().unwrap().threads.iter().enumerate() {
+    for thread in net_backend.read().unwrap().threads.iter() {
         thread
             .lock()
             .unwrap()
-            .set_epoll_fd(epoll_handlers[index].as_raw_fd());
+            .set_vring_worker(Some(vring_workers.remove(0)));
     }
 
     if let Err(e) = if backend_config.client {
         net_daemon.start_client(&backend_config.socket)
     } else {
-        net_daemon.start(Listener::new(&backend_config.socket, true).unwrap())
+        net_daemon.start_server(Listener::new(&backend_config.socket, true).unwrap())
     } {
         error!(
             "failed to start daemon for vhost-user-net with error: {:?}",

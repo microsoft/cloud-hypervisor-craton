@@ -3,13 +3,13 @@
 // found in the LICENSE-BSD-3-Clause file.
 
 use crate::configuration::{self, PciBarRegionType};
-use crate::PciBarConfiguration;
 use std::any::Any;
 use std::fmt::{self, Display};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier};
 use std::{self, io, result};
 use vm_allocator::{AddressAllocator, SystemAllocator};
-use vm_device::{BusDevice, Resource};
+use vm_device::BusDevice;
+use vm_memory::{GuestAddress, GuestUsize};
 
 #[derive(Debug)]
 pub enum Error {
@@ -19,8 +19,6 @@ pub enum Error {
     IoAllocationFailed(u64),
     /// Registering an IO BAR failed.
     IoRegistrationFailed(u64, configuration::Error),
-    /// Expected resource not found.
-    MissingResource,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -36,7 +34,6 @@ impl Display for Error {
             IoRegistrationFailed(addr, e) => {
                 write!(f, "failed to register an IO BAR, addr={} err={}", addr, e)
             }
-            MissingResource => write!(f, "failed to find expected resource"),
         }
     }
 }
@@ -54,10 +51,9 @@ pub trait PciDevice: BusDevice {
     /// returns an address. Returns a Vec of (GuestAddress, GuestUsize) tuples.
     fn allocate_bars(
         &mut self,
-        _allocator: &Arc<Mutex<SystemAllocator>>,
+        _allocator: &mut SystemAllocator,
         _mmio_allocator: &mut AddressAllocator,
-        _resources: Option<Vec<Resource>>,
-    ) -> Result<Vec<PciBarConfiguration>> {
+    ) -> Result<Vec<(GuestAddress, GuestUsize, PciBarRegionType)>> {
         Ok(Vec::new())
     }
 
@@ -107,9 +103,6 @@ pub trait PciDevice: BusDevice {
     /// Provides a mutable reference to the Any trait. This is useful to let
     /// the caller have access to the underlying type behind the trait.
     fn as_any(&mut self) -> &mut dyn Any;
-
-    /// Optionally returns a unique identifier.
-    fn id(&self) -> Option<String>;
 }
 
 /// This trait defines a set of functions which can be triggered whenever a

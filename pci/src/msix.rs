@@ -132,11 +132,7 @@ impl MsixConfig {
                 };
 
                 self.interrupt_source_group
-                    .update(
-                        idx as InterruptIndex,
-                        InterruptSourceConfig::MsiIrq(config),
-                        self.masked,
-                    )
+                    .update(idx as InterruptIndex, InterruptSourceConfig::MsiIrq(config))
                     .map_err(Error::UpdateInterruptRoute)?;
 
                 self.interrupt_source_group
@@ -166,7 +162,6 @@ impl MsixConfig {
         // Update interrupt routing
         if old_masked != self.masked || old_enabled != self.enabled {
             if self.enabled && !self.masked {
-                debug!("MSI-X enabled for device 0x{:x}", self.devid);
                 for (idx, table_entry) in self.table_entries.iter().enumerate() {
                     let config = MsiIrqSourceConfig {
                         high_addr: table_entry.msg_addr_hi,
@@ -175,16 +170,23 @@ impl MsixConfig {
                         devid: self.devid,
                     };
 
-                    if let Err(e) = self.interrupt_source_group.update(
-                        idx as InterruptIndex,
-                        InterruptSourceConfig::MsiIrq(config),
-                        table_entry.masked(),
-                    ) {
+                    if let Err(e) = self
+                        .interrupt_source_group
+                        .update(idx as InterruptIndex, InterruptSourceConfig::MsiIrq(config))
+                    {
                         error!("Failed updating vector: {:?}", e);
+                    }
+
+                    if table_entry.masked() {
+                        if let Err(e) = self.interrupt_source_group.mask(idx as InterruptIndex) {
+                            error!("Failed masking vector: {:?}", e);
+                        }
+                    } else if let Err(e) = self.interrupt_source_group.unmask(idx as InterruptIndex)
+                    {
+                        error!("Failed unmasking vector: {:?}", e);
                     }
                 }
             } else if old_enabled || !old_masked {
-                debug!("MSI-X disabled for device 0x{:x}", self.devid);
                 if let Err(e) = self.interrupt_source_group.disable() {
                     error!("Failed disabling irq_fd: {:?}", e);
                 }
@@ -310,9 +312,16 @@ impl MsixConfig {
             if let Err(e) = self.interrupt_source_group.update(
                 index as InterruptIndex,
                 InterruptSourceConfig::MsiIrq(config),
-                table_entry.masked(),
             ) {
                 error!("Failed updating vector: {:?}", e);
+            }
+
+            if table_entry.masked() {
+                if let Err(e) = self.interrupt_source_group.mask(index as InterruptIndex) {
+                    error!("Failed masking vector: {:?}", e);
+                }
+            } else if let Err(e) = self.interrupt_source_group.unmask(index as InterruptIndex) {
+                error!("Failed unmasking vector: {:?}", e);
             }
         }
 
@@ -441,7 +450,7 @@ impl Snapshottable for MsixConfig {
 
 #[allow(dead_code)]
 #[repr(packed)]
-#[derive(Clone, Copy, Default, Versionize)]
+#[derive(Clone, Copy, Default)]
 pub struct MsixCap {
     // Message Control Register
     //   10-0:  MSI-X Table size

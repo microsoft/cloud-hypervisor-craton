@@ -14,7 +14,7 @@ use acpi_tables::{aml::Aml, rsdp::Rsdp, sdt::Sdt};
 use arch::aarch64::DeviceInfoForFdt;
 #[cfg(target_arch = "aarch64")]
 use arch::DeviceType;
-#[cfg(feature = "acpi")]
+#[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use arch::NumaNodes;
 
 use bitflags::bitflags;
@@ -405,78 +405,6 @@ fn create_spcr_table(base_address: u64, gsi: u32) -> Sdt {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn create_dbg2_table(base_address: u64) -> Sdt {
-    let namespace = "_SB_.COM1";
-    let debug_device_info_offset = 44usize;
-    let debug_device_info_len: u16 = 22 /* BaseAddressRegisterOffset */ +
-                       12 /* BaseAddressRegister */ +
-                       4 /* AddressSize */ +
-                       namespace.len() as u16 + 1 /* zero-terminated */;
-    let tbl_len: u32 = debug_device_info_offset as u32 + debug_device_info_len as u32;
-    let mut dbg2 = Sdt::new(*b"DBG2", tbl_len, 0, *b"CLOUDH", *b"CHDBG2  ", 1);
-
-    /* OffsetDbgDeviceInfo */
-    dbg2.write_u32(36, 44);
-    /* NumberDbgDeviceInfo */
-    dbg2.write_u32(40, 1);
-
-    /* Debug Device Information structure */
-    /* Offsets are calculated from the start of this structure. */
-    let namespace_offset = 38u16;
-    let base_address_register_offset = 22u16;
-    let address_size_offset = 34u16;
-    /* Revision */
-    dbg2.write_u8(debug_device_info_offset, 0);
-    /* Length */
-    dbg2.write_u16(debug_device_info_offset + 1, debug_device_info_len);
-    /* NumberofGenericAddressRegisters */
-    dbg2.write_u8(debug_device_info_offset + 3, 1);
-    /* NameSpaceStringLength */
-    dbg2.write_u16(debug_device_info_offset + 4, namespace.len() as u16 + 1);
-    /* NameSpaceStringOffset */
-    dbg2.write_u16(debug_device_info_offset + 6, namespace_offset);
-    /* OemDataLength */
-    dbg2.write_u16(debug_device_info_offset + 8, 0);
-    /* OemDataOffset */
-    dbg2.write_u16(debug_device_info_offset + 10, 0);
-    /* Port Type */
-    dbg2.write_u16(debug_device_info_offset + 12, 0x8000);
-    /* Port Subtype */
-    dbg2.write_u16(debug_device_info_offset + 14, 0x0003);
-    /* Reserved */
-    dbg2.write_u16(debug_device_info_offset + 16, 0);
-    /* BaseAddressRegisterOffset */
-    dbg2.write_u16(debug_device_info_offset + 18, base_address_register_offset);
-    /* AddressSizeOffset */
-    dbg2.write_u16(debug_device_info_offset + 20, address_size_offset);
-    /* BaseAddressRegister */
-    dbg2.write(
-        debug_device_info_offset + base_address_register_offset as usize,
-        GenericAddress::mmio_address::<u8>(base_address),
-    );
-    /* AddressSize */
-    dbg2.write_u32(
-        debug_device_info_offset + address_size_offset as usize,
-        0x1000,
-    );
-    /* NamespaceString, zero-terminated ASCII */
-    for (k, c) in namespace.chars().enumerate() {
-        dbg2.write_u8(
-            debug_device_info_offset + namespace_offset as usize + k,
-            c as u8,
-        );
-    }
-    dbg2.write_u8(
-        debug_device_info_offset + namespace_offset as usize + namespace.len(),
-        0,
-    );
-
-    dbg2.update_checksum();
-
-    dbg2
-}
-#[cfg(feature = "pci_support")]
-#[cfg(target_arch = "aarch64")]
 fn create_iort_table(pci_segments: &[PciSegment]) -> Sdt {
     const ACPI_IORT_NODE_ITS_GROUP: u8 = 0x00;
     const ACPI_IORT_NODE_PCI_ROOT_COMPLEX: u8 = 0x02;
@@ -596,6 +524,8 @@ pub fn create_acpi_tables(
     numa_nodes: &NumaNodes,
 ) -> GuestAddress {
     let start_time = Instant::now();
+    let mut prev_tbl_len: u64;
+    let mut prev_tbl_off: GuestAddress;
     let rsdp_offset = arch::layout::RSDP_POINTER;
     let mut tables: Vec<u64> = Vec::new();
 
@@ -621,8 +551,8 @@ pub fn create_acpi_tables(
         .write_slice(madt.as_slice(), madt_offset)
         .expect("Error writing MADT table");
     tables.push(madt_offset.0);
-    let mut prev_tbl_len = madt.len() as u64;
-    let mut prev_tbl_off = madt_offset;
+    prev_tbl_len = madt.len() as u64;
+    prev_tbl_off = madt_offset;
 
     // PPTT
     #[cfg(target_arch = "aarch64")]
@@ -663,7 +593,8 @@ pub fn create_acpi_tables(
         prev_tbl_off = mcfg_offset;
     }
 
-    // SPCR and DBG2
+
+    // SPCR
     #[cfg(target_arch = "aarch64")]
     {
         let is_serial_on = device_manager
@@ -673,7 +604,7 @@ pub fn create_acpi_tables(
             .clone()
             .get(&(DeviceType::Serial, DeviceType::Serial.to_string()))
             .is_some();
-        let serial_device_addr = arch::layout::LEGACY_SERIAL_MAPPED_IO_START.raw_value();
+        let serial_device_addr = arch::layout::LEGACY_SERIAL_MAPPED_IO_START;
         let serial_device_irq = if is_serial_on {
             device_manager
                 .lock()
@@ -687,8 +618,6 @@ pub fn create_acpi_tables(
             // If serial is turned off, add a fake device with invalid irq.
             31
         };
-
-        // SPCR
         let spcr = create_spcr_table(serial_device_addr, serial_device_irq);
         let spcr_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
         guest_mem
@@ -697,16 +626,6 @@ pub fn create_acpi_tables(
         tables.push(spcr_offset.0);
         prev_tbl_len = spcr.len() as u64;
         prev_tbl_off = spcr_offset;
-
-        // DBG2
-        let dbg2 = create_dbg2_table(serial_device_addr);
-        let dbg2_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
-        guest_mem
-            .write_slice(dbg2.as_slice(), dbg2_offset)
-            .expect("Error writing DBG2 table");
-        tables.push(dbg2_offset.0);
-        prev_tbl_len = dbg2.len() as u64;
-        prev_tbl_off = dbg2_offset;
     }
 
     // SRAT and SLIT
@@ -731,7 +650,7 @@ pub fn create_acpi_tables(
         prev_tbl_len = slit.len() as u64;
         prev_tbl_off = slit_offset;
     };
-    #[cfg(feature = "pci_support")]
+
     #[cfg(target_arch = "aarch64")]
     {
         let iort = create_iort_table(device_manager.lock().unwrap().pci_segments());
@@ -747,8 +666,7 @@ pub fn create_acpi_tables(
     // VIOT
     #[cfg(feature = "pci_support")]
     {
-        if let Some((iommu_bdf, devices_bdf)) =
-            device_manager.lock().unwrap().iommu_attached_devices()
+        if let Some((iommu_bdf, devices_bdf)) = device_manager.lock().unwrap().iommu_attached_devices()
         {
             let viot = create_viot_table(iommu_bdf, devices_bdf);
 
@@ -780,54 +698,8 @@ pub fn create_acpi_tables(
         .expect("Error writing RSDP");
 
     info!(
-        "Generated ACPI tables: took {}µs size = {}",
-        Instant::now().duration_since(start_time).as_micros(),
-        xsdt_offset.0 + xsdt.len() as u64 - rsdp_offset.0
+        "Generated ACPI tables: took {}µs",
+        Instant::now().duration_since(start_time).as_micros()
     );
     rsdp_offset
-}
-
-#[allow(dead_code)]
-#[cfg(any(feature = "tdx", feature = "acpi"))]
-pub fn create_acpi_tables_tdx(
-    device_manager: &Arc<Mutex<DeviceManager>>,
-    cpu_manager: &Arc<Mutex<CpuManager>>,
-    memory_manager: &Arc<Mutex<MemoryManager>>,
-    numa_nodes: &NumaNodes,
-) -> Vec<Sdt> {
-    // DSDT
-    let mut tables = vec![create_dsdt_table(
-        device_manager,
-        cpu_manager,
-        memory_manager,
-    )];
-
-    // FACP aka FADT
-    tables.push(create_facp_table(GuestAddress(0)));
-
-    // MADT
-    tables.push(cpu_manager.lock().unwrap().create_madt());
-
-    // MCFG
-    tables.push(create_mcfg_table(
-        device_manager.lock().unwrap().pci_segments(),
-    ));
-
-    // SRAT and SLIT
-    // Only created if the NUMA nodes list is not empty.
-    if !numa_nodes.is_empty() {
-        // SRAT
-        tables.push(create_srat_table(numa_nodes));
-
-        // SLIT
-        tables.push(create_slit_table(numa_nodes));
-    };
-
-    // VIOT
-    if let Some((iommu_bdf, devices_bdf)) = device_manager.lock().unwrap().iommu_attached_devices()
-    {
-        tables.push(create_viot_table(iommu_bdf, devices_bdf));
-    }
-
-    tables
 }

@@ -9,18 +9,18 @@
 #[macro_use(crate_version, crate_authors)]
 extern crate clap;
 
-use clap::{Arg, Command};
+use clap::{App, Arg};
 use vhost_user_net::start_net_backend;
 
 fn main() {
     env_logger::init();
 
-    let cmd_arguments = Command::new("vhost-user-net backend")
+    let cmd_arguments = App::new("vhost-user-net backend")
         .version(crate_version!())
         .author(crate_authors!())
         .about("Launch a vhost-user-net backend.")
         .arg(
-            Arg::new("net-backend")
+            Arg::with_name("net-backend")
                 .long("net-backend")
                 .help(vhost_user_net::SYNTAX)
                 .takes_value(true)

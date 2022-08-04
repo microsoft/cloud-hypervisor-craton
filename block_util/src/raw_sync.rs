@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
 use crate::async_io::{
-    AsyncIo, AsyncIoError, AsyncIoResult, DiskFile, DiskFileError, DiskFileResult, DiskTopology,
+    AsyncIo, AsyncIoError, AsyncIoResult, DiskFile, DiskFileError, DiskFileResult,
 };
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
@@ -30,15 +30,6 @@ impl DiskFile for RawFileDiskSync {
 
     fn new_async_io(&self, _ring_depth: u32) -> DiskFileResult<Box<dyn AsyncIo>> {
         Ok(Box::new(RawFileSync::new(self.file.as_raw_fd())) as Box<dyn AsyncIo>)
-    }
-
-    fn topology(&mut self) -> DiskTopology {
-        if let Ok(topology) = DiskTopology::probe(&mut self.file) {
-            topology
-        } else {
-            warn!("Unable to get device topology. Using default topology");
-            DiskTopology::default()
-        }
     }
 }
 

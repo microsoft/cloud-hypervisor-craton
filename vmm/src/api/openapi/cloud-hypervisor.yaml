@@ -195,8 +195,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PciDeviceInfo'
-        204:
-          description: The new device was successfully (cold) added to the VM instance.
         404:
           description: The new device could not be added to the VM instance.
 
@@ -233,8 +231,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PciDeviceInfo'
-        204:
-          description: The new disk was successfully (cold) added to the VM instance.
         500:
           description: The new disk could not be added to the VM instance.
 
@@ -255,8 +251,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PciDeviceInfo'
-        204:
-          description: The new device was successfully (cold) added to the VM instance.
         500:
           description: The new device could not be added to the VM instance.
 
@@ -277,8 +271,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PciDeviceInfo'
-        204:
-          description: The new device was successfully (cold) added to the VM instance.
         500:
           description: The new device could not be added to the VM instance.
 
@@ -299,8 +291,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PciDeviceInfo'
-        204:
-          description: The new device was successfully (cold) added to the VM instance.
         500:
           description: The new device could not be added to the VM instance.
 
@@ -321,32 +311,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PciDeviceInfo'
-        204:
-          description: The new device was successfully (cold) added to the VM instance.
         500:
           description: The new device could not be added to the VM instance.
-  
-  /vm.add-vdpa:
-    put:
-      summary: Add a new vDPA device to the VM
-      requestBody:
-        description: The details of the new vDPA device
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/VdpaConfig'
-        required: true
-      responses:
-        200:
-          description: The new vDPA device was successfully added to the VM instance.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PciDeviceInfo'
-        204:
-          description: The new vDPA device was successfully (cold) added to the VM instance.
-        500:
-          description: The new vDPA device could not be added to the VM instance.
+
 
   /vm.snapshot:
     put:
@@ -366,24 +333,6 @@ paths:
         405:
           description: The VM instance could not be snapshotted because it is not booted.
 
-  /vm.coredump:
-    put:
-      summary: Takes a VM coredump.
-      requestBody:
-        description: The coredump configuration
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/VmCoredumpData'
-        required: true
-      responses:
-        204:
-          description: The VM instance was successfully coredumped.
-        404:
-          description: The VM instance could not be coredumped because it is not created.
-        405:
-          description: The VM instance could not be coredumped because it is not booted.
-
   /vm.restore:
     put:
       summary: Restore a VM from a snapshot.
@@ -399,38 +348,6 @@ paths:
           description: The VM instance was successfully restored.
         404:
           description: The VM instance could not be restored because it is already created.
-
-  /vm.receive-migration:
-    put:
-      summary: Receive a VM migration from URL
-      requestBody:
-        description: The URL for the reception of migration state
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ReceiveMigrationData'
-        required: true
-      responses:
-        204:
-          description: The VM migration was successfully received.
-        500:
-          description: The VM migration could not be received.
-
-  /vm.send-migration:
-    put:
-      summary: Send a VM migration to URL
-      requestBody:
-        description: The URL for sending the migration state
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SendMigrationData'
-        required: true
-      responses:
-        204:
-          description: The VM migration was successfully sent.
-        500:
-          description: The VM migration could not be sent.
 
 components:
   schemas:
@@ -479,7 +396,8 @@ components:
           items:
             type: string
         pci_bdf:
-          type: string
+          type: integer
+          format: int32
 
     VmCounters:
       type: object
@@ -544,18 +462,12 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DeviceConfig'
-        vdpa:
-          type: array
-          items:
-            $ref: '#/components/schemas/VdpaConfig'
         vsock:
             $ref: '#/components/schemas/VsockConfig'
         sgx_epc:
           type: array
           items:
             $ref: '#/components/schemas/SgxEpcConfig'
-        tdx:
-          $ref: '#/components/schemas/TdxConfig'
         numa:
           type: array
           items:
@@ -566,8 +478,6 @@ components:
         watchdog:
           type: boolean
           default: false
-        platform:
-          $ref: '#/components/schemas/PlatformConfig'
       description: Virtual machine configuration
 
     CpuAffinity:
@@ -579,12 +489,6 @@ components:
           type: array
           items:
             type: integer
-
-    CpuFeatures:
-      type: object
-      properties:
-        amx:
-          type: boolean
 
     CpuTopology:
       type: object
@@ -614,31 +518,12 @@ components:
           type: integer
         topology:
           $ref: '#/components/schemas/CpuTopology'
-        kvm_hyperv:
-          type: boolean
-          default: false
         max_phys_bits:
           type: integer
         affinity:
           type: array
           items:
             $ref: '#/components/schemas/CpuAffinity'
-        features:
-          $ref: '#/components/schemas/CpuFeatures'
-
-    PlatformConfig:
-      type: object
-      properties:
-        num_pci_segments:
-          type: integer
-          format: int16
-        iommu_segments:
-          type: array
-          items:
-            type: integer
-            format: int16
-        serial_number:
-          type: string
 
     MemoryZoneConfig:
       required:
@@ -827,6 +712,7 @@ components:
       properties:
         tap:
           type: string
+          default: ""
         ip:
           type: string
           default: "192.168.249.1"
@@ -854,6 +740,11 @@ components:
           default: "Client"
         id:
           type: string
+        fd:
+          type: array
+          items:
+            type: integer
+            format: int32
         pci_segment:
           type: integer
           format: int16
@@ -883,14 +774,12 @@ components:
         deflate_on_oom:
           type: boolean
           default: false
-          description: Deflate balloon when the guest is under memory pressure.
-        free_page_reporting:
-          type: boolean
-          default: false
-          description: Enable guest to report free pages.
+          description: Whether the balloon should deflate when the guest is under memory pressure.
 
     FsConfig:
       required:
+      - cache_size
+      - dax
       - num_queues
       - queue_size
       - socket
@@ -907,6 +796,13 @@ components:
         queue_size:
           type: integer
           default: 1024
+        dax:
+          type: boolean
+          default: true
+        cache_size:
+          type: integer
+          format: int64
+          default: 8589934592
         pci_segment:
           type: integer
           format: int16
@@ -924,6 +820,9 @@ components:
           type: integer
           format: int64
         iommu:
+          type: boolean
+          default: false
+        mergeable:
           type: boolean
           default: false
         discard_writes:
@@ -956,26 +855,6 @@ components:
       properties:
         path:
           type: string
-        iommu:
-          type: boolean
-          default: false
-        pci_segment:
-          type: integer
-          format: int16
-        id:
-          type: string
-
-    VdpaConfig:
-      required:
-      - path
-      - num_queues
-      type: object
-      properties:
-        path:
-          type: string
-        num_queues:
-          type: integer
-          default: 1
         iommu:
           type: boolean
           default: false
@@ -1022,15 +901,6 @@ components:
         prefault:
           type: boolean
           default: false
-
-    TdxConfig:
-      required:
-      - firmware
-      type: object
-      properties:
-        firmware:
-          type: string
-          description: Path to the firmware that will be used to boot the TDx guest up.
 
     NumaDistance:
       required:
@@ -1119,12 +989,6 @@ components:
         destination_url:
           type: string
 
-    VmCoredumpData:
-      type: object
-      properties:
-        destination_url:
-          type: string
-
     RestoreConfig:
       required:
       - source_url
@@ -1133,22 +997,4 @@ components:
         source_url:
           type: string
         prefault:
-          type: boolean
-
-    ReceiveMigrationData:
-      required:
-      - receiver_url
-      type: object
-      properties:
-        receiver_url:
-          type: string
-
-    SendMigrationData:
-      required:
-      - destination_url
-      type: object
-      properties:
-        destination_url:
-          type: string
-        local:
           type: boolean

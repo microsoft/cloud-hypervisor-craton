@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
+use virtio_queue::AccessPlatform;
 use virtio_queue::Queue;
 use vm_device::interrupt::InterruptSourceGroup;
 use vm_device::BusDevice;
@@ -24,7 +25,6 @@ use vm_memory::{GuestAddress, GuestMemoryAtomic};
 use vm_migration::{
     Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable, VersionMapped,
 };
-use vm_virtio::AccessPlatform;
 use vmm_sys_util::{errno::Result, eventfd::EventFd};
 
 const VENDOR_ID: u32 = 0;
@@ -54,10 +54,14 @@ impl VirtioInterruptIntx {
 }
 
 impl VirtioInterrupt for VirtioInterruptIntx {
-    fn trigger(&self, int_type: VirtioInterruptType) -> std::result::Result<(), std::io::Error> {
+    fn trigger(
+        &self,
+        int_type: &VirtioInterruptType,
+        _queue: Option<&Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
+    ) -> std::result::Result<(), std::io::Error> {
         let status = match int_type {
             VirtioInterruptType::Config => INTERRUPT_STATUS_CONFIG_CHANGED,
-            VirtioInterruptType::Queue(_queue_index) => INTERRUPT_STATUS_USED_RING,
+            VirtioInterruptType::Queue => INTERRUPT_STATUS_USED_RING,
         };
         self.interrupt_status
             .fetch_or(status as usize, Ordering::SeqCst);
@@ -79,37 +83,6 @@ struct VirtioMmioDeviceState {
 }
 
 impl VersionMapped for VirtioMmioDeviceState {}
-
-pub struct VirtioMmioDeviceActivator {
-    interrupt: Option<Arc<dyn VirtioInterrupt>>,
-    memory: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
-    device: Arc<Mutex<dyn VirtioDevice>>,
-    device_activated: Arc<AtomicBool>,
-    queues: Option<Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>>,
-    queue_evts: Option<Vec<EventFd>>,
-    barrier: Option<Arc<Barrier>>,
-    id: String,
-}
-
-impl VirtioMmioDeviceActivator {
-    pub fn activate(&mut self) -> ActivateResult {
-        self.device.lock().unwrap().activate(
-            self.memory.take().unwrap(),
-            self.interrupt.take().unwrap(),
-            self.queues.take().unwrap(),
-            self.queue_evts.take().unwrap(),
-        )?;
-        self.device_activated.store(true, Ordering::SeqCst);
-
-        if let Some(barrier) = self.barrier.take() {
-            info!("{}: Waiting for barrier", self.id);
-            barrier.wait();
-            info!("{}: Barrier released", self.id);
-        }
-
-        Ok(())
-    }
-}
 
 /// Implements the
 /// [MMIO](http://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-1090002)
@@ -144,8 +117,6 @@ pub struct VirtioMmioDevice {
 
     activate_evt: EventFd,
     activate_barrier: Arc<Barrier>,
-    // Pending activations
-    pending_activations: Arc<Mutex<Vec<VirtioMmioDeviceActivator>>>,
 }
 
 impl VirtioMmioDevice {
@@ -154,10 +125,9 @@ impl VirtioMmioDevice {
         id: String,
         memory: GuestMemoryAtomic<GuestMemoryMmap>,
         device: Arc<Mutex<dyn VirtioDevice>>,
-        _access_platform: Option<Arc<dyn AccessPlatform>>,
+        access_platform: Option<Arc<dyn AccessPlatform>>,
         interrupt: Arc<dyn InterruptSourceGroup>,
         activate_evt: EventFd,
-        pending_activations: Arc<Mutex<Vec<VirtioMmioDeviceActivator>>>,
     ) -> Result<VirtioMmioDevice> {
         let device_clone = device.clone();
         let locked_device = device_clone.lock().unwrap();
@@ -169,10 +139,12 @@ impl VirtioMmioDevice {
             .queue_max_sizes()
             .iter()
             .map(|&s| {
-                Queue::<GuestMemoryAtomic<GuestMemoryMmap>, virtio_queue::QueueState>::new(
-                    memory.clone(),
-                    s,
-                )
+                let mut queue = Queue::<
+                    GuestMemoryAtomic<GuestMemoryMmap>,
+                    virtio_queue::QueueState<GuestMemoryAtomic<GuestMemoryMmap>>,
+                >::new(memory.clone(), s);
+                queue.state.access_platform = access_platform.clone();
+                queue
             })
             .collect();
 
@@ -198,7 +170,6 @@ impl VirtioMmioDevice {
             shm_region_select: 0,
             activate_evt,
             activate_barrier: Arc::new(Barrier::new(2)),
-            pending_activations,
         })
     }
 
@@ -218,6 +189,7 @@ impl VirtioMmioDevice {
                     max_size: q.max_size(),
                     size: q.state.size,
                     ready: q.state.ready,
+                    vector: q.state.vector,
                     desc_table: q.state.desc_table.0,
                     avail_ring: q.state.avail_ring.0,
                     used_ring: q.state.used_ring.0,
@@ -234,7 +206,6 @@ impl VirtioMmioDevice {
         self.queue_select = state.queue_select;
         self.interrupt_status
             .store(state.interrupt_status, Ordering::SeqCst);
-        info!("MMIO: set_state set status  {:?}", state.driver_status);
         self.driver_status = state.driver_status;
 
         // Update virtqueues indexes for both available and used rings.
@@ -242,6 +213,7 @@ impl VirtioMmioDevice {
             queue.state.max_size = state.queues[i].max_size;
             queue.state.size = state.queues[i].size;
             queue.state.ready = state.queues[i].ready;
+            queue.state.vector = state.queues[i].vector;
             queue.state.desc_table = GuestAddress(state.queues[i].desc_table);
             queue.state.avail_ring = GuestAddress(state.queues[i].avail_ring);
             queue.state.used_ring = GuestAddress(state.queues[i].used_ring);
@@ -304,39 +276,26 @@ impl VirtioMmioDevice {
             interrupt,
         )));
     }
-    fn prepare_activator(&mut self, barrier: Option<Arc<Barrier>>) -> VirtioMmioDeviceActivator {
-        let mut queue_evts = Vec::new();
-        let mut queues: Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>> =
-            self.queues.iter().map(vm_virtio::clone_queue).collect();
-        queues.retain(|q| q.state.ready);
-        for (i, queue) in queues.iter().enumerate() {
-            queue_evts.push(self.queue_evts[i].try_clone().unwrap());
-            if !queue.is_valid() {
-                error!("Queue {} is not valid", i);
-            }
-        }
-
-        VirtioMmioDeviceActivator {
-            interrupt: self.virtio_interrupt.take(),
-            memory: self.memory.clone(),
-            device: self.device.clone(),
-            queues: Some(queues),
-            device_activated: self.device_activated.clone(),
-            queue_evts: Some(
-                queue_evts
-                    .iter()
-                    .map(|fd| fd.try_clone().unwrap())
-                    .collect(),
-            ),
-            barrier,
-            id: self.id.clone(),
-        }
-    }
 
     fn activate(&mut self) -> ActivateResult {
-        self.prepare_activator(None).activate()
+        if let Some(virtio_interrupt) = self.virtio_interrupt.take() {
+            if self.memory.is_some() {
+                let mem = self.memory.as_ref().unwrap().clone();
+                let mut device = self.device.lock().unwrap();
+                let mut queue_evts = Vec::new();
+                let mut queues = self.queues.clone();
+                queues.retain(|q| q.state.ready);
+                for (i, queue) in queues.iter().enumerate() {
+                    queue_evts.push(self.queue_evts[i].try_clone().unwrap());
+                    if !queue.is_valid() {
+                        error!("Queue {} is not valid", i);
+                    }
+                }
+                return device.activate(mem, virtio_interrupt, queues, queue_evts);
+            }
+        }
+        Ok(())
     }
-
     pub fn maybe_activate(&mut self) {
         if self.needs_activation() {
             self.activate().expect("Failed to activate device");
@@ -503,18 +462,14 @@ impl BusDevice for VirtioMmioDevice {
             }
         }
 
-        // Try and activate the device if the driver status has changed
         if self.needs_activation() {
-            let barrier = Arc::new(Barrier::new(2));
-            let activator = self.prepare_activator(Some(barrier.clone()));
-            self.pending_activations.lock().unwrap().push(activator);
             info!(
                 "{}: Needs activation; writing to activate event fd",
                 self.id
             );
             self.activate_evt.write(1).ok();
             info!("{}: Needs activation; returning barrier", self.id);
-            return Some(barrier);
+            return Some(self.activate_barrier.clone());
         }
 
         // Device has been reset by the driver
@@ -531,7 +486,7 @@ impl BusDevice for VirtioMmioDevice {
                 self.queue_select = 0;
             } else {
                 error!("Attempt to reset device when not implemented in underlying device");
-                self.driver_status = crate::DEVICE_FAILED as u32;
+                self.driver_status = crate::DEVICE_FAILED;
             }
         }
 

@@ -39,7 +39,6 @@ use virtio_queue::Queue;
 use vm_memory::{ByteValued, GuestMemoryAtomic};
 use vm_migration::VersionMapped;
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
-use vm_virtio::AccessPlatform;
 use vmm_sys_util::eventfd::EventFd;
 
 /// Control queue
@@ -52,21 +51,9 @@ pub struct NetCtrlEpollHandler {
     pub ctrl_q: CtrlQueue,
     pub queue_evt: EventFd,
     pub queue: Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
-    pub access_platform: Option<Arc<dyn AccessPlatform>>,
-    pub interrupt_cb: Arc<dyn VirtioInterrupt>,
-    pub queue_index: u16,
 }
 
 impl NetCtrlEpollHandler {
-    fn signal_used_queue(&self, queue_index: u16) -> result::Result<(), DeviceError> {
-        self.interrupt_cb
-            .trigger(VirtioInterruptType::Queue(queue_index))
-            .map_err(|e| {
-                error!("Failed to signal used queue: {:?}", e);
-                DeviceError::FailedSignalingUsedQueue(e)
-            })
-    }
-
     pub fn run_ctrl(
         &mut self,
         paused: Arc<AtomicBool>,
@@ -86,33 +73,16 @@ impl EpollHelperHandler for NetCtrlEpollHandler {
         match ev_type {
             CTRL_QUEUE_EVENT => {
                 if let Err(e) = self.queue_evt.read() {
-                    error!("Failed to get control queue event: {:?}", e);
+                    error!("failed to get ctl queue event: {:?}", e);
                     return true;
                 }
-                if let Err(e) = self
-                    .ctrl_q
-                    .process(&mut self.queue, self.access_platform.as_ref())
-                {
-                    error!("Failed to process control queue: {:?}", e);
+                if let Err(e) = self.ctrl_q.process(&mut self.queue) {
+                    error!("failed to process ctrl queue: {:?}", e);
                     return true;
-                } else {
-                    match self.queue.needs_notification() {
-                        Ok(true) => {
-                            if let Err(e) = self.signal_used_queue(self.queue_index) {
-                                error!("Error signalling that control queue was used: {:?}", e);
-                                return true;
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            error!("Error getting notification state of control queue: {}", e);
-                            return true;
-                        }
-                    }
                 }
             }
             _ => {
-                error!("Unknown event for virtio-net control queue");
+                error!("Unknown event for virtio-net");
                 return true;
             }
         }
@@ -154,7 +124,6 @@ struct NetEpollHandler {
     interrupt_cb: Arc<dyn VirtioInterrupt>,
     kill_evt: EventFd,
     pause_evt: EventFd,
-    queue_index_base: u16,
     queue_pair: Vec<Queue<GuestMemoryAtomic<GuestMemoryMmap>>>,
     queue_evt_pair: Vec<EventFd>,
     // Always generate interrupts until the driver has signalled to the device.
@@ -165,9 +134,12 @@ struct NetEpollHandler {
 }
 
 impl NetEpollHandler {
-    fn signal_used_queue(&self, queue_index: u16) -> result::Result<(), DeviceError> {
+    fn signal_used_queue(
+        &self,
+        queue: &Queue<GuestMemoryAtomic<GuestMemoryMmap>>,
+    ) -> result::Result<(), DeviceError> {
         self.interrupt_cb
-            .trigger(VirtioInterruptType::Queue(queue_index))
+            .trigger(&VirtioInterruptType::Queue, Some(queue))
             .map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);
                 DeviceError::FailedSignalingUsedQueue(e)
@@ -210,7 +182,7 @@ impl NetEpollHandler {
             .map_err(DeviceError::NetQueuePair)?
             || !self.driver_awake
         {
-            self.signal_used_queue(self.queue_index_base + 1)?;
+            self.signal_used_queue(&self.queue_pair[1])?;
             debug!("Signalling TX queue");
         } else {
             debug!("Not signalling TX queue");
@@ -239,7 +211,7 @@ impl NetEpollHandler {
             .map_err(DeviceError::NetQueuePair)?
             || !self.driver_awake
         {
-            self.signal_used_queue(self.queue_index_base)?;
+            self.signal_used_queue(&self.queue_pair[0])?;
             debug!("Signalling RX queue");
         } else {
             debug!("Not signalling RX queue");
@@ -590,25 +562,18 @@ impl VirtioDevice for Net {
     ) -> ActivateResult {
         self.common.activate(&queues, &queue_evts, &interrupt_cb)?;
 
-        let num_queues = queues.len();
-        let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
-        if self.common.feature_acked(VIRTIO_NET_F_CTRL_VQ.into()) && num_queues % 2 != 0 {
-            let ctrl_queue_index = num_queues - 1;
-            let mut ctrl_queue = queues.remove(ctrl_queue_index);
-            let ctrl_queue_evt = queue_evts.remove(ctrl_queue_index);
-
-            ctrl_queue.set_event_idx(event_idx);
+        let queue_num = queues.len();
+        if self.common.feature_acked(VIRTIO_NET_F_CTRL_VQ.into()) && queue_num % 2 != 0 {
+            let cvq_queue = queues.remove(queue_num - 1);
+            let cvq_queue_evt = queue_evts.remove(queue_num - 1);
 
             let (kill_evt, pause_evt) = self.common.dup_eventfds();
             let mut ctrl_handler = NetCtrlEpollHandler {
                 kill_evt,
                 pause_evt,
                 ctrl_q: CtrlQueue::new(self.taps.clone()),
-                queue: ctrl_queue,
-                queue_evt: ctrl_queue_evt,
-                access_platform: self.common.access_platform.clone(),
-                queue_index: ctrl_queue_index as u16,
-                interrupt_cb: interrupt_cb.clone(),
+                queue: cvq_queue,
+                queue_evt: cvq_queue_evt,
             };
 
             let paused = self.common.paused.clone();
@@ -633,6 +598,8 @@ impl VirtioDevice for Net {
             )?;
             self.ctrl_queue_epoll_thread = Some(epoll_threads.remove(0));
         }
+
+        let event_idx = self.common.feature_acked(VIRTIO_RING_F_EVENT_IDX.into());
 
         let mut epoll_threads = Vec::new();
         let mut taps = self.taps.clone();
@@ -683,9 +650,7 @@ impl VirtioDevice for Net {
                     rx_desc_avail: false,
                     rx_rate_limiter,
                     tx_rate_limiter,
-                    access_platform: self.common.access_platform.clone(),
                 },
-                queue_index_base: (i * 2) as u16,
                 queue_pair,
                 queue_evt_pair,
                 interrupt_cb: interrupt_cb.clone(),
@@ -744,10 +709,6 @@ impl VirtioDevice for Net {
         );
 
         Some(counters)
-    }
-
-    fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
-        self.common.set_access_platform(access_platform)
     }
 }
 

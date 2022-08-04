@@ -11,11 +11,11 @@ use crate::cpu;
 use crate::cpu::Vcpu;
 use crate::hypervisor;
 use crate::vec_with_array_field;
-use crate::vm::{self, InterruptSourceConfig, VmOps};
+use crate::vm::{self, VmmOps};
 pub use mshv_bindings::*;
 pub use mshv_ioctls::IoEventAddress;
 use mshv_ioctls::{set_registers_64, Mshv, NoDatamatch, VcpuFd, VmFd};
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use vm::DataMatch;
@@ -108,17 +108,6 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             break;
         }
 
-        // Default Microsoft Hypervisor behavior for unimplemented MSR is to
-        // send a fault to the guest if it tries to access it. It is possible
-        // to override this behavior with a more suitable option i.e., ignore
-        // writes from the guest and return zero in attempt to read unimplemented
-        // MSR.
-        fd.set_partition_property(
-            hv_partition_property_code_HV_PARTITION_PROPERTY_UNIMPLEMENTED_MSR_ACTION,
-            hv_unimplemented_msr_action_HV_UNIMPLEMENTED_MSR_ACTION_IGNORE_WRITE_READ_ZERO as u64,
-        )
-        .map_err(|e| hypervisor::HypervisorError::SetPartitionProperty(e.into()))?;
-
         let msr_list = self.get_msr_list()?;
         let num_msrs = msr_list.as_fam_struct_ref().nmsrs as usize;
         let mut msrs = MsrEntries::new(num_msrs).unwrap();
@@ -133,7 +122,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
             fd: vm_fd,
             msrs,
             hv_state: hv_state_init(),
-            vm_ops: None,
+            vmmops: None,
             dirty_log_slots: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
@@ -145,7 +134,7 @@ impl hypervisor::Hypervisor for MshvHypervisor {
     }
     #[cfg(target_arch = "x86_64")]
     ///
-    /// Retrieve the list of MSRs supported by MSHV.
+    /// Retrieve the list of MSRs supported by KVM.
     ///
     fn get_msr_list(&self) -> hypervisor::Result<MsrList> {
         self.mshv
@@ -162,7 +151,7 @@ pub struct MshvVcpu {
     cpuid: CpuId,
     msrs: MsrEntries,
     hv_state: Arc<RwLock<HvState>>, // Mshv State
-    vm_ops: Option<Arc<dyn vm::VmOps>>,
+    vmmops: Option<Arc<dyn vm::VmmOps>>,
 }
 
 /// Implementation of Vcpu trait for Microsoft Hypervisor
@@ -356,24 +345,24 @@ impl cpu::Vcpu for MshvVcpu {
 
                     // SAFETY: access_info is valid, otherwise we won't be here
                     assert!(
-                        (unsafe { access_info.__bindgen_anon_1.string_op() } != 1),
+                        !(unsafe { access_info.__bindgen_anon_1.string_op() } == 1),
                         "String IN/OUT not supported"
                     );
                     assert!(
-                        (unsafe { access_info.__bindgen_anon_1.rep_prefix() } != 1),
+                        !(unsafe { access_info.__bindgen_anon_1.rep_prefix() } == 1),
                         "Rep IN/OUT not supported"
                     );
 
                     if is_write {
                         let data = (info.rax as u32).to_le_bytes();
-                        if let Some(vm_ops) = &self.vm_ops {
-                            vm_ops
+                        if let Some(vmmops) = &self.vmmops {
+                            vmmops
                                 .pio_write(port.into(), &data[0..len])
                                 .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                         }
                     } else {
-                        if let Some(vm_ops) = &self.vm_ops {
-                            vm_ops
+                        if let Some(vmmops) = &self.vmmops {
+                            vmmops
                                 .pio_read(port.into(), &mut data[0..len])
                                 .map_err(|e| cpu::HypervisorCpuError::RunVcpu(e.into()))?;
                         }
@@ -572,17 +561,13 @@ impl cpu::Vcpu for MshvVcpu {
     ///
     /// Translate guest virtual address to guest physical address
     ///
-    fn translate_gva(&self, gva: u64, flags: u64) -> cpu::Result<(u64, u32)> {
+    fn translate_gva(&self, gva: u64, flags: u64) -> cpu::Result<(u64, hv_translate_gva_result)> {
         let r = self
             .fd
             .translate_gva(gva, flags)
             .map_err(|e| cpu::HypervisorCpuError::TranslateVirtualAddress(e.into()))?;
 
-        let gpa = r.0;
-        // SAFETY: r is valid, otherwise this function will have returned
-        let result_code = unsafe { r.1.__bindgen_anon_1.result_code };
-
-        Ok((gpa, result_code))
+        Ok(r)
     }
     #[cfg(target_arch = "x86_64")]
     ///
@@ -641,13 +626,15 @@ impl<'a> MshvEmulatorContext<'a> {
         // TODO: More fine-grained control for the flags
         let flags = HV_TRANSLATE_GVA_VALIDATE_READ | HV_TRANSLATE_GVA_VALIDATE_WRITE;
 
-        let (gpa, result_code) = self
+        let r = self
             .vcpu
             .translate_gva(gva, flags.into())
             .map_err(|e| PlatformError::TranslateVirtualAddress(anyhow!(e)))?;
 
+        // SAFETY: r is valid, otherwise this function will have returned
+        let result_code = unsafe { r.1.__bindgen_anon_1.result_code };
         match result_code {
-            hv_translate_gva_result_code_HV_TRANSLATE_GVA_SUCCESS => Ok(gpa),
+            hv_translate_gva_result_code_HV_TRANSLATE_GVA_SUCCESS => Ok(r.0),
             _ => Err(PlatformError::TranslateVirtualAddress(anyhow!(result_code))),
         }
     }
@@ -666,9 +653,9 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
             gpa
         );
 
-        if let Some(vm_ops) = &self.vcpu.vm_ops {
-            if vm_ops.guest_mem_read(gpa, data).is_err() {
-                vm_ops
+        if let Some(vmmops) = &self.vcpu.vmmops {
+            if vmmops.guest_mem_read(gpa, data).is_err() {
+                vmmops
                     .mmio_read(gpa, data)
                     .map_err(|e| PlatformError::MemoryReadFailure(e.into()))?;
             }
@@ -686,9 +673,9 @@ impl<'a> PlatformEmulator for MshvEmulatorContext<'a> {
             gpa
         );
 
-        if let Some(vm_ops) = &self.vcpu.vm_ops {
-            if vm_ops.guest_mem_write(gpa, data).is_err() {
-                vm_ops
+        if let Some(vmmops) = &self.vcpu.vmmops {
+            if vmmops.guest_mem_write(gpa, data).is_err() {
+                vmmops
                     .mmio_write(gpa, data)
                     .map_err(|e| PlatformError::MemoryWriteFailure(e.into()))?;
             }
@@ -757,7 +744,7 @@ pub struct MshvVm {
     msrs: MsrEntries,
     // Hypervisor State
     hv_state: Arc<RwLock<HvState>>,
-    vm_ops: Option<Arc<dyn vm::VmOps>>,
+    vmmops: Option<Arc<dyn vm::VmmOps>>,
     dirty_log_slots: Arc<RwLock<HashMap<u64, MshvDirtyLogSlot>>>,
 }
 
@@ -827,7 +814,7 @@ impl vm::Vm for MshvVm {
     fn create_vcpu(
         &self,
         id: u8,
-        vm_ops: Option<Arc<dyn VmOps>>,
+        vmmops: Option<Arc<dyn VmmOps>>,
     ) -> vm::Result<Arc<dyn cpu::Vcpu>> {
         let vcpu_fd = self
             .fd
@@ -839,7 +826,7 @@ impl vm::Vm for MshvVm {
             cpuid: CpuId::new(1).unwrap(),
             msrs: self.msrs.clone(),
             hv_state: self.hv_state.clone(),
-            vm_ops,
+            vmmops,
         };
         Ok(Arc::new(vcpu))
     }
@@ -968,27 +955,6 @@ impl vm::Vm for MshvVm {
             .map_err(|e| vm::HypervisorVmError::CreatePassthroughDevice(e.into()))
     }
 
-    ///
-    /// Constructs a routing entry
-    ///
-    fn make_routing_entry(
-        &self,
-        gsi: u32,
-        config: &InterruptSourceConfig,
-    ) -> mshv_msi_routing_entry {
-        match config {
-            InterruptSourceConfig::MsiIrq(cfg) => mshv_msi_routing_entry {
-                gsi,
-                address_lo: cfg.low_addr,
-                address_hi: cfg.high_addr,
-                data: cfg.data,
-            },
-            _ => {
-                unreachable!()
-            }
-        }
-    }
-
     fn set_gsi_routing(&self, entries: &[IrqRoutingEntry]) -> vm::Result<()> {
         let mut msi_routing =
             vec_with_array_field::<mshv_msi_routing, mshv_msi_routing_entry>(entries.len());
@@ -1059,3 +1025,6 @@ impl vm::Vm for MshvVm {
             .map_err(|e| vm::HypervisorVmError::GetDirtyLog(e.into()))
     }
 }
+pub use hv_cpuid_entry as CpuIdEntry;
+
+pub const CPUID_FLAG_VALID_INDEX: u32 = 0;

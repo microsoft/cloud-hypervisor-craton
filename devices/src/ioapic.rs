@@ -367,12 +367,18 @@ impl Ioapic {
         };
 
         self.interrupt_source_group
-            .update(
-                irq as InterruptIndex,
-                InterruptSourceConfig::MsiIrq(config),
-                interrupt_mask(entry) == 1,
-            )
+            .update(irq as InterruptIndex, InterruptSourceConfig::MsiIrq(config))
             .map_err(Error::UpdateInterrupt)?;
+
+        if interrupt_mask(entry) == 1 {
+            self.interrupt_source_group
+                .mask(irq as InterruptIndex)
+                .map_err(Error::MaskInterrupt)?;
+        } else {
+            self.interrupt_source_group
+                .unmask(irq as InterruptIndex)
+                .map_err(Error::UnmaskInterrupt)?;
+        }
 
         Ok(())
     }

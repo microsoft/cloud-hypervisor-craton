@@ -11,8 +11,9 @@ if [[ "$hypervisor" = "mshv" ]]; then
     exit 1
 fi
 
-# For now these values are default for kvm
-features=""
+# For now these values are deafult for kvm
+features_build=""
+features_test="--features integration_tests"
 
 BUILD_TARGET="$(uname -m)-unknown-linux-${CH_LIBC}"
 CFLAGS=""
@@ -22,12 +23,12 @@ TARGET_CC="musl-gcc"
 CFLAGS="-I /usr/include/x86_64-linux-musl/ -idirafter /usr/include/"
 fi
 
-cargo build --all --release $features --target $BUILD_TARGET
+cargo build --all --release $features_build --target $BUILD_TARGET
 strip target/$BUILD_TARGET/release/cloud-hypervisor
 
 export RUST_BACKTRACE=1
 
-time cargo test $features "sgx::$test_filter" -- ${test_binary_args[*]}
+time cargo test $features_test "tests::sgx::$test_filter"
 RES=$?
 
 exit $RES

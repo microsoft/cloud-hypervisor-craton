@@ -15,8 +15,7 @@ pub mod regs;
 use crate::GuestMemoryMmap;
 use crate::InitramfsConfig;
 use crate::RegionType;
-use hypervisor::x86_64::{CpuId, CpuIdEntry, CPUID_FLAG_VALID_INDEX};
-use hypervisor::HypervisorError;
+use hypervisor::{CpuId, CpuIdEntry, HypervisorError, CPUID_FLAG_VALID_INDEX};
 use linux_loader::loader::bootparam::boot_params;
 use linux_loader::loader::elf::start_info::{
     hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info,
@@ -187,18 +186,11 @@ pub enum Error {
 
     /// Error checking CPUID compatibility
     CpuidCheckCompatibility,
-
-    // Error writing EBDA address
-    EbdaSetup(vm_memory::GuestMemoryError),
-
-    /// Error retrieving TDX capabilities through the hypervisor (kvm/mshv) API
-    #[cfg(feature = "tdx")]
-    TdxCapabilities(HypervisorError),
 }
 
 impl From<Error> for super::Error {
     fn from(e: Error) -> super::Error {
-        super::Error::PlatformSpecific(e)
+        super::Error::X86_64Setup(e)
     }
 }
 
@@ -323,12 +315,21 @@ impl CpuidPatch {
 
         for entry in entries.iter() {
             if entry.function == function && entry.index == index {
-                let reg_val = match reg {
-                    CpuidReg::EAX => entry.eax,
-                    CpuidReg::EBX => entry.ebx,
-                    CpuidReg::ECX => entry.ecx,
-                    CpuidReg::EDX => entry.edx,
-                };
+                let reg_val: u32;
+                match reg {
+                    CpuidReg::EAX => {
+                        reg_val = entry.eax;
+                    }
+                    CpuidReg::EBX => {
+                        reg_val = entry.ebx;
+                    }
+                    CpuidReg::ECX => {
+                        reg_val = entry.ecx;
+                    }
+                    CpuidReg::EDX => {
+                        reg_val = entry.edx;
+                    }
+                }
 
                 return (reg_val & mask) == mask;
             }
@@ -521,14 +522,19 @@ impl CpuidFeatureEntry {
             .enumerate()
         {
             let entry = &feature_entry_list[i];
-            let entry_compatible = match entry.compatible_check {
+            let entry_compatible;
+            match entry.compatible_check {
                 CpuidCompatibleCheck::BitwiseSubset => {
                     let different_feature_bits = src_vm_feature ^ dest_vm_feature;
                     let src_vm_feature_bits_only = different_feature_bits & src_vm_feature;
-                    src_vm_feature_bits_only == 0
+                    entry_compatible = src_vm_feature_bits_only == 0;
                 }
-                CpuidCompatibleCheck::Equal => src_vm_feature == dest_vm_feature,
-                CpuidCompatibleCheck::NumNotGreater => src_vm_feature <= dest_vm_feature,
+                CpuidCompatibleCheck::Equal => {
+                    entry_compatible = src_vm_feature == dest_vm_feature;
+                }
+                CpuidCompatibleCheck::NumNotGreater => {
+                    entry_compatible = src_vm_feature <= dest_vm_feature;
+                }
             };
             if !entry_compatible {
                 error!(
@@ -605,39 +611,9 @@ pub fn generate_common_cpuid(
         update_cpuid_sgx(&mut cpuid, sgx_epc_sections)?;
     }
 
-    #[cfg(feature = "tdx")]
-    let tdx_capabilities = if tdx_enabled {
-        let caps = hypervisor
-            .tdx_capabilities()
-            .map_err(Error::TdxCapabilities)?;
-        info!("TDX capabilities {:#?}", caps);
-        Some(caps)
-    } else {
-        None
-    };
-
     // Update some existing CPUID
     for entry in cpuid.as_mut_slice().iter_mut() {
         match entry.function {
-            0xd =>
-            {
-                #[cfg(feature = "tdx")]
-                if let Some(caps) = &tdx_capabilities {
-                    let xcr0_mask: u64 = 0x82ff;
-                    let xss_mask: u64 = !xcr0_mask;
-                    if entry.index == 0 {
-                        entry.eax &= (caps.xfam_fixed0 as u32) & (xcr0_mask as u32);
-                        entry.eax |= (caps.xfam_fixed1 as u32) & (xcr0_mask as u32);
-                        entry.edx &= ((caps.xfam_fixed0 & xcr0_mask) >> 32) as u32;
-                        entry.edx |= ((caps.xfam_fixed1 & xcr0_mask) >> 32) as u32;
-                    } else if entry.index == 1 {
-                        entry.ecx &= (caps.xfam_fixed0 as u32) & (xss_mask as u32);
-                        entry.ecx |= (caps.xfam_fixed1 as u32) & (xss_mask as u32);
-                        entry.edx &= ((caps.xfam_fixed0 & xss_mask) >> 32) as u32;
-                        entry.edx |= ((caps.xfam_fixed1 & xss_mask) >> 32) as u32;
-                    }
-                }
-            }
             // Set CPU physical bits
             0x8000_0008 => {
                 entry.eax = (entry.eax & 0xffff_ff00) | (phys_bits as u32 & 0xff);
@@ -744,7 +720,7 @@ pub fn generate_common_cpuid(
 }
 
 pub fn configure_vcpu(
-    vcpu: &Arc<dyn hypervisor::Vcpu>,
+    fd: &Arc<dyn hypervisor::Vcpu>,
     id: u8,
     kernel_entry_point: Option<EntryPoint>,
     vm_memory: &GuestMemoryAtomic<GuestMemoryMmap>,
@@ -756,23 +732,23 @@ pub fn configure_vcpu(
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0xb, None, CpuidReg::EDX, u32::from(id));
     CpuidPatch::set_cpuid_reg(&mut cpuid, 0x1f, None, CpuidReg::EDX, u32::from(id));
 
-    vcpu.set_cpuid2(&cpuid)
+    fd.set_cpuid2(&cpuid)
         .map_err(|e| Error::SetSupportedCpusFailed(e.into()))?;
 
     if kvm_hyperv {
-        vcpu.enable_hyperv_synic().unwrap();
+        fd.enable_hyperv_synic().unwrap();
     }
 
-    regs::setup_msrs(vcpu).map_err(Error::MsrsConfiguration)?;
+    regs::setup_msrs(fd).map_err(Error::MsrsConfiguration)?;
     if let Some(kernel_entry_point) = kernel_entry_point {
         if let Some(entry_addr) = kernel_entry_point.entry_addr {
             // Safe to unwrap because this method is called after the VM is configured
-            regs::setup_regs(vcpu, entry_addr.raw_value()).map_err(Error::RegsConfiguration)?;
-            regs::setup_fpu(vcpu).map_err(Error::FpuConfiguration)?;
-            regs::setup_sregs(&vm_memory.memory(), vcpu).map_err(Error::SregsConfiguration)?;
+            regs::setup_regs(fd, entry_addr.raw_value()).map_err(Error::RegsConfiguration)?;
+            regs::setup_fpu(fd).map_err(Error::FpuConfiguration)?;
+            regs::setup_sregs(&vm_memory.memory(), fd).map_err(Error::SregsConfiguration)?;
         }
     }
-    interrupts::set_lint(vcpu).map_err(|e| Error::LocalIntConfiguration(e.into()))?;
+    interrupts::set_lint(fd).map_err(|e| Error::LocalIntConfiguration(e.into()))?;
     Ok(())
 }
 
@@ -839,14 +815,8 @@ pub fn configure_system(
     _num_cpus: u8,
     rsdp_addr: Option<GuestAddress>,
     sgx_epc_region: Option<SgxEpcRegion>,
-    serial_number: Option<&str>,
 ) -> super::Result<()> {
-    // Write EBDA address to location where ACPICA expects to find it
-    guest_mem
-        .write_obj((layout::EBDA_START.0 >> 4) as u16, layout::EBDA_POINTER)
-        .map_err(Error::EbdaSetup)?;
-
-    let size = smbios::setup_smbios(guest_mem, serial_number).map_err(Error::SmbiosSetup)?;
+    let size = smbios::setup_smbios(guest_mem).map_err(Error::SmbiosSetup)?;
 
     // Place the MP table after the SMIOS table aligned to 16 bytes
     let offset = GuestAddress(layout::SMBIOS_START).unchecked_add(size);
@@ -1195,7 +1165,6 @@ mod tests {
             1,
             Some(layout::RSDP_POINTER),
             None,
-            None,
         );
         assert!(config_err.is_err());
 
@@ -1209,7 +1178,7 @@ mod tests {
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None).unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
         let mem_size = 3328 << 20;
@@ -1220,9 +1189,9 @@ mod tests {
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None).unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None).unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
         let mem_size = 3330 << 20;
@@ -1233,9 +1202,9 @@ mod tests {
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None).unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None).unwrap();
     }
 
     #[test]

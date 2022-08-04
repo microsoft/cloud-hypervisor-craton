@@ -28,11 +28,14 @@ fn get_op<T: CpuStateManager>(
         )));
     }
 
-    if !matches!(op_size, 1 | 2 | 4 | 8) {
-        return Err(PlatformError::InvalidOperand(anyhow!(
-            "Invalid operand size {:?}",
-            op_size
-        )));
+    match op_size {
+        1 | 2 | 4 | 8 => {}
+        _ => {
+            return Err(PlatformError::InvalidOperand(anyhow!(
+                "Invalid operand size {:?}",
+                op_size
+            )))
+        }
     }
 
     let value = match insn
@@ -78,11 +81,14 @@ fn set_op<T: CpuStateManager>(
         )));
     }
 
-    if !matches!(op_size, 1 | 2 | 4 | 8) {
-        return Err(PlatformError::InvalidOperand(anyhow!(
-            "Invalid operand size {:?}",
-            op_size
-        )));
+    match op_size {
+        1 | 2 | 4 | 8 => {}
+        _ => {
+            return Err(PlatformError::InvalidOperand(anyhow!(
+                "Invalid operand size {:?}",
+                op_size
+            )))
+        }
     }
 
     match insn

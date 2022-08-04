@@ -15,7 +15,7 @@ use serde::ser::{Serialize, Serializer};
 
 pub const MAC_ADDR_LEN: usize = 6;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MacAddr {
     bytes: [u8; MAC_ADDR_LEN],
 }
