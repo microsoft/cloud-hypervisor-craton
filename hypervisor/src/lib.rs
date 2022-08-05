@@ -18,8 +18,6 @@
 //! - arm64
 //!
 
-#![allow(clippy::significant_drop_in_scrutinee)]
-
 #[macro_use]
 extern crate anyhow;
 #[cfg(target_arch = "x86_64")]
@@ -165,14 +163,13 @@ pub enum ClockData {
     Mshv, /* MSHV does not supprt ClockData yet */
 }
 
+#[allow(irrefutable_let_patterns)]
 #[cfg(target_arch = "x86_64")]
 impl ClockData {
     pub fn reset_flags(&mut self) {
-        match self {
-            #[cfg(feature = "kvm")]
-            ClockData::Kvm(s) => s.flags = 0,
-            #[allow(unreachable_patterns)]
-            _ => {}
+        #[cfg(feature = "kvm")]
+        if let ClockData::Kvm(s) = self {
+            s.flags = 0
         }
     }
 }
