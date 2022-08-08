@@ -6,6 +6,7 @@ edition = "2021"
 
 [features]
 default = []
+pci_support = []
 
 [dependencies]
 anyhow = "1.0.62"

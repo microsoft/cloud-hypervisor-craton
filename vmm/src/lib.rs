@@ -67,6 +67,7 @@ mod gdb;
 pub mod interrupt;
 pub mod memory_manager;
 pub mod migration;
+#[cfg(feature = "pci_support")]
 mod pci_segment;
 pub mod seccomp_filters;
 mod serial_manager;

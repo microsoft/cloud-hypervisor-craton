@@ -14,6 +14,7 @@ gdb = ["kvm", "gdbstub", "gdbstub_arch"]
 guest_debug = ["kvm"]
 kvm = ["hypervisor/kvm", "vfio-ioctls/kvm", "vm-device/kvm", "pci/kvm"]
 mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
+pci_support = ["pci", "virtio-devices/pci_support"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 
 [dependencies]
@@ -37,7 +38,7 @@ micro_http = { git = "https://github.com/firecracker-microvm/micro-http", branch
 net_util = { path = "../net_util" }
 once_cell = "1.13.1"
 option_parser = { path = "../option_parser" }
-pci = { path = "../pci" }
+pci = { path = "../pci", optional = true }
 qcow = { path = "../qcow" }
 seccompiler = "0.2.0"
 serde = { version = "1.0.144", features = ["rc", "derive"] }

@@ -11,12 +11,14 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
+#[cfg(feature = "pci_support")]
+use crate::config::add_to_config;
 #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use crate::config::NumaConfig;
 use crate::config::PayloadConfig;
 use crate::config::{
-    add_to_config, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
-    UserDeviceConfig, ValidationError, VdpaConfig, VmConfig, VsockConfig,
+    DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig, UserDeviceConfig,
+    ValidationError, VdpaConfig, VmConfig, VsockConfig,
 };
 #[cfg(feature = "guest_debug")]
 use crate::coredump::{
@@ -92,7 +94,7 @@ use std::time::Instant;
 use std::{result, str, thread};
 use thiserror::Error;
 use vm_device::Bus;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "pci_support"))]
 use vm_device::BusDevice;
 #[cfg(target_arch = "x86_64")]
 use vm_memory::Address;
@@ -370,7 +372,7 @@ struct VmOpsHandler {
     #[cfg(target_arch = "x86_64")]
     io_bus: Arc<Bus>,
     mmio_bus: Arc<Bus>,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "pci_support"))]
     pci_config_io: Arc<Mutex<dyn BusDevice>>,
 }
 
@@ -413,15 +415,19 @@ impl VmOps for VmOpsHandler {
 
     #[cfg(target_arch = "x86_64")]
     fn pio_read(&self, port: u64, data: &mut [u8]) -> result::Result<(), HypervisorVmError> {
-        use pci::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
+        #[cfg(feature = "pci_support")]
+        {
+            use pci::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
 
-        if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port) {
-            self.pci_config_io.lock().unwrap().read(
-                PCI_CONFIG_IO_PORT,
-                port - PCI_CONFIG_IO_PORT,
-                data,
-            );
-            return Ok(());
+            if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port)
+            {
+                self.pci_config_io.lock().unwrap().read(
+                    PCI_CONFIG_IO_PORT,
+                    port - PCI_CONFIG_IO_PORT,
+                    data,
+                );
+                return Ok(());
+            }
         }
 
         if let Err(vm_device::BusError::MissingAddressRange) = self.io_bus.read(port, data) {
@@ -432,17 +438,20 @@ impl VmOps for VmOpsHandler {
 
     #[cfg(target_arch = "x86_64")]
     fn pio_write(&self, port: u64, data: &[u8]) -> result::Result<(), HypervisorVmError> {
-        use pci::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
+        #[cfg(feature = "pci_support")]
+        {
+            use pci::{PCI_CONFIG_IO_PORT, PCI_CONFIG_IO_PORT_SIZE};
 
-        if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port) {
-            self.pci_config_io.lock().unwrap().write(
-                PCI_CONFIG_IO_PORT,
-                port - PCI_CONFIG_IO_PORT,
-                data,
-            );
-            return Ok(());
+            if (PCI_CONFIG_IO_PORT..(PCI_CONFIG_IO_PORT + PCI_CONFIG_IO_PORT_SIZE)).contains(&port)
+            {
+                self.pci_config_io.lock().unwrap().write(
+                    PCI_CONFIG_IO_PORT,
+                    port - PCI_CONFIG_IO_PORT,
+                    data,
+                );
+                return Ok(());
+            }
         }
-
         match self.io_bus.write(port, data) {
             Err(vm_device::BusError::MissingAddressRange) => {
                 warn!("Guest PIO write to unregistered address 0x{:x}", port);
@@ -561,7 +570,7 @@ impl Vm {
         let io_bus = Arc::clone(device_manager.lock().unwrap().io_bus());
         let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "pci_support"))]
         let pci_config_io =
             device_manager.lock().unwrap().pci_config_io() as Arc<Mutex<dyn BusDevice>>;
         let vm_ops: Arc<dyn VmOps> = Arc::new(VmOpsHandler {
@@ -569,7 +578,7 @@ impl Vm {
             #[cfg(target_arch = "x86_64")]
             io_bus,
             mmio_bus,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(target_arch = "x86_64", feature = "pci_support"))]
             pci_config_io,
         });
 
@@ -1228,6 +1237,7 @@ impl Vm {
         let vcpu_mpidrs = self.cpu_manager.lock().unwrap().get_mpidrs();
         let vcpu_topology = self.cpu_manager.lock().unwrap().get_vcpu_topology();
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
+        #[cfg(feature = "pci_support")]
         let mut pci_space_info: Vec<PciSpaceInfo> = Vec::new();
         let initramfs_config = match self.initramfs {
             Some(_) => Some(self.load_initramfs(&mem)?),
@@ -1240,27 +1250,30 @@ impl Vm {
             .unwrap()
             .get_device_info()
             .clone();
-
-        for pci_segment in self.device_manager.lock().unwrap().pci_segments().iter() {
-            let pci_space = PciSpaceInfo {
-                pci_segment_id: pci_segment.id,
-                mmio_config_address: pci_segment.mmio_config_address,
-                pci_device_space_start: pci_segment.start_of_device_area,
-                pci_device_space_size: pci_segment.end_of_device_area
-                    - pci_segment.start_of_device_area
-                    + 1,
-            };
-            pci_space_info.push(pci_space);
+        #[cfg(feature = "pci_support")]
+        {
+            for pci_segment in self.device_manager.lock().unwrap().pci_segments().iter() {
+                let pci_space = PciSpaceInfo {
+                    pci_segment_id: pci_segment.id,
+                    mmio_config_address: pci_segment.mmio_config_address,
+                    pci_device_space_start: pci_segment.start_of_device_area,
+                    pci_device_space_size: pci_segment.end_of_device_area
+                        - pci_segment.start_of_device_area
+                        + 1,
+                };
+                pci_space_info.push(pci_space);
+            }
         }
-
-        let virtio_iommu_bdf = self
-            .device_manager
-            .lock()
-            .unwrap()
-            .iommu_attached_devices()
-            .as_ref()
-            .map(|(v, _)| *v);
-
+        let virtio_iommu_bdf = if cfg!(feature = "pci_support") {
+            self.device_manager
+                .lock()
+                .unwrap()
+                .iommu_attached_devices()
+                .as_ref()
+                .map(|(v, _)| *v)
+        } else {
+            None
+        };
         let vgic = self
             .device_manager
             .lock()
@@ -1392,6 +1405,7 @@ impl Vm {
                 .resize(desired_vcpus)
                 .map_err(Error::CpuManager)?
             {
+                #[cfg(feature = "pci_support")]
                 self.device_manager
                     .lock()
                     .unwrap()
@@ -1417,7 +1431,7 @@ impl Vm {
                     .unwrap()
                     .update_memory(new_region)
                     .map_err(Error::DeviceManager)?;
-
+                #[cfg(feature = "pci_support")]
                 match memory_config.hotplug_method {
                     HotplugMethod::Acpi => {
                         self.device_manager
@@ -1499,7 +1513,7 @@ impl Vm {
         error!("Could not find the memory zone {} for the resize", id);
         Err(Error::ResizeZone)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_device(&mut self, mut device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1523,7 +1537,7 @@ impl Vm {
 
         Ok(pci_device_info)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_user_device(&mut self, mut device_cfg: UserDeviceConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1547,7 +1561,7 @@ impl Vm {
 
         Ok(pci_device_info)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn remove_device(&mut self, id: String) -> Result<()> {
         self.device_manager
             .lock()
@@ -1608,7 +1622,7 @@ impl Vm {
             .map_err(Error::DeviceManager)?;
         Ok(())
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_disk(&mut self, mut disk_cfg: DiskConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1632,7 +1646,7 @@ impl Vm {
 
         Ok(pci_device_info)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_fs(&mut self, mut fs_cfg: FsConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1656,7 +1670,7 @@ impl Vm {
 
         Ok(pci_device_info)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_pmem(&mut self, mut pmem_cfg: PmemConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1680,7 +1694,7 @@ impl Vm {
 
         Ok(pci_device_info)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_net(&mut self, mut net_cfg: NetConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1704,7 +1718,7 @@ impl Vm {
 
         Ok(pci_device_info)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_vdpa(&mut self, mut vdpa_cfg: VdpaConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -1728,7 +1742,7 @@ impl Vm {
 
         Ok(pci_device_info)
     }
-
+    #[cfg(feature = "pci_support")]
     pub fn add_vsock(&mut self, mut vsock_cfg: VsockConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
             .device_manager
@@ -2111,7 +2125,6 @@ impl Vm {
     // Creates ACPI tables
     // In case of TDX being used, this is a no-op since the tables will be
     // created and passed when populating the HOB.
-
     #[cfg(feature = "acpi")]
     fn create_acpi_tables(&self) -> Option<GuestAddress> {
         #[cfg(feature = "tdx")]
