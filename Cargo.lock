@@ -161,6 +161,7 @@ dependencies = [
  "anyhow",
  "api_client",
  "clap",
+ "devices",
  "dirs",
  "epoll",
  "event_monitor",
