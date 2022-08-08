@@ -19,6 +19,7 @@ lto = true
 anyhow = "1.0.58"
 api_client = { path = "api_client" }
 clap = { version = "3.2.8", features = ["wrap_help","cargo"] }
+devices = { path = "devices" }
 epoll = "4.3.1"
 event_monitor = { path = "event_monitor" }
 hypervisor = { path = "hypervisor" }
@@ -53,7 +54,7 @@ wait-timeout = "0.2.0"
 [features]
 default = ["common", "kvm"]
 # Common features for all hypervisors
-common = ["acpi", "fwdebug"]
+common = ["acpi", "fwdebug", "pci"]
 acpi = ["vmm/acpi"]
 amx = ["vmm/amx"]
 cmos = ["vmm/cmos"]
@@ -62,6 +63,7 @@ gdb = ["vmm/gdb"]
 guest_debug = ["vmm/guest_debug"]
 kvm = ["vmm/kvm"]
 mshv = ["vmm/mshv"]
+pci = ["vmm/pci_support", "devices/pci_support"]
 tdx = ["vmm/tdx"]
 
 [workspace]
