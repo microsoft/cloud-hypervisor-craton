@@ -101,6 +101,7 @@ const RESIZE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // New descriptors are pending on the virtio queue.
 const QUEUE_AVAIL_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 2;
 
+#[cfg(feature = "pci_support")]
 // Virtio features
 const VIRTIO_MEM_F_ACPI_PXM: u8 = 0;
 
@@ -829,7 +830,7 @@ impl Mem {
         region: &Arc<GuestRegionMmap>,
         resize: ResizeSender,
         seccomp_action: SeccompAction,
-        numa_node_id: Option<u16>,
+        #[cfg(feature = "pci_support")] numa_node_id: Option<u16>,
         initial_size: u64,
         hugepages: bool,
         exit_evt: EventFd,
@@ -847,7 +848,10 @@ impl Mem {
             ));
         }
 
+        #[cfg(feature = "pci_support")]
         let mut avail_features = 1u64 << VIRTIO_F_VERSION_1;
+        #[cfg(not(feature = "pci_support"))]
+        let avail_features = 1u64 << VIRTIO_F_VERSION_1;
 
         let mut config = VirtioMemConfig {
             block_size: VIRTIO_MEM_DEFAULT_BLOCK_SIZE,
@@ -871,6 +875,7 @@ impl Mem {
             })?;
         }
 
+        #[cfg(feature = "pci_support")]
         if let Some(node_id) = numa_node_id {
             avail_features |= 1u64 << VIRTIO_MEM_F_ACPI_PXM;
             config.node_id = node_id;

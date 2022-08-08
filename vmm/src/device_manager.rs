@@ -10,15 +10,18 @@
 //
 
 use crate::config::{
-    ConsoleOutputMode, DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig,
-    VdpaConfig, VhostMode, VmConfig, VsockConfig,
+    ConsoleOutputMode, DiskConfig, FsConfig, NetConfig, PmemConfig, VhostMode, VmConfig,
+    VsockConfig,
 };
+#[cfg(feature = "pci_support")]
+use crate::config::{DeviceConfig, UserDeviceConfig, VdpaConfig};
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::LegacyUserspaceInterruptManager;
 use crate::interrupt::MsiInterruptManager;
 #[cfg(feature = "acpi")]
 use crate::memory_manager::MEMORY_MANAGER_ACPI_SIZE;
 use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
+#[cfg(feature = "pci_support")]
 use crate::pci_segment::PciSegment;
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::serial_manager::{Error as SerialManagerError, SerialManager};
@@ -26,6 +29,7 @@ use crate::sigwinch_listener::start_sigwinch_listener;
 #[cfg(target_arch = "aarch64")]
 use crate::GuestMemoryMmap;
 use crate::GuestRegionMmap;
+#[cfg(feature = "pci_support")]
 use crate::PciDeviceInfo;
 use crate::{device_node, DEVICE_MANAGER_SNAPSHOT_ID};
 #[cfg(feature = "acpi")]
@@ -62,8 +66,9 @@ use libc::{
     cfmakeraw, isatty, tcgetattr, tcsetattr, termios, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED,
     O_TMPFILE, PROT_READ, PROT_WRITE, TCSANOW,
 };
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "pci_support"))]
 use pci::PciConfigIo;
+#[cfg(feature = "pci_support")]
 use pci::{
     DeviceRelocation, PciBarRegionType, PciBdf, PciDevice, VfioPciDevice, VfioUserDmaMapping,
     VfioUserPciDevice, VfioUserPciDeviceError,
@@ -82,15 +87,19 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+#[cfg(feature = "pci_support")]
 use vfio_ioctls::{VfioContainer, VfioDevice, VfioDeviceFd};
 use virtio_devices::transport::VirtioTransport;
+#[cfg(feature = "pci_support")]
 use virtio_devices::transport::{VirtioPciDevice, VirtioPciDeviceActivator};
 use virtio_devices::vhost_user::VhostUserConfig;
-use virtio_devices::{
-    AccessPlatformMapping, ActivateError, VdpaDmaMapping, VirtioMemMappingSource,
-};
-use virtio_devices::{Endpoint, IommuMapping};
-use vm_allocator::{AddressAllocator, SystemAllocator};
+#[cfg(feature = "pci_support")]
+use virtio_devices::{AccessPlatformMapping, IommuMapping, VdpaDmaMapping, VirtioMemMappingSource};
+use virtio_devices::{ActivateError, Endpoint};
+#[cfg(feature = "pci_support")]
+use vm_allocator::AddressAllocator;
+use vm_allocator::SystemAllocator;
+#[cfg(feature = "pci_support")]
 use vm_device::dma_mapping::vfio::VfioDmaMapping;
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_device::interrupt::{
@@ -108,7 +117,9 @@ use vm_migration::{
     protocol::MemoryRangeTable, Migratable, MigratableError, Pausable, Snapshot,
     SnapshotDataSection, Snapshottable, Transportable,
 };
+#[cfg(feature = "pci_support")]
 use vm_virtio::AccessPlatform;
+#[cfg(feature = "pci_support")]
 use vm_virtio::VirtioDeviceType;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -122,6 +133,7 @@ const SERIAL_DEVICE_NAME: &str = "__serial";
 #[cfg(target_arch = "aarch64")]
 const GPIO_DEVICE_NAME: &str = "__gpio";
 const RNG_DEVICE_NAME: &str = "__rng";
+#[cfg(feature = "pci_support")]
 const IOMMU_DEVICE_NAME: &str = "__iommu";
 const BALLOON_DEVICE_NAME: &str = "__balloon";
 const CONSOLE_DEVICE_NAME: &str = "__console";
@@ -132,11 +144,15 @@ const DISK_DEVICE_NAME_PREFIX: &str = "_disk";
 const FS_DEVICE_NAME_PREFIX: &str = "_fs";
 const NET_DEVICE_NAME_PREFIX: &str = "_net";
 const PMEM_DEVICE_NAME_PREFIX: &str = "_pmem";
+#[cfg(feature = "pci_support")]
 const VDPA_DEVICE_NAME_PREFIX: &str = "_vdpa";
 const VSOCK_DEVICE_NAME_PREFIX: &str = "_vsock";
 const WATCHDOG_DEVICE_NAME: &str = "__watchdog";
+#[cfg(feature = "pci_support")]
 const VFIO_DEVICE_NAME_PREFIX: &str = "_vfio";
+#[cfg(feature = "pci_support")]
 const VFIO_USER_DEVICE_NAME_PREFIX: &str = "_vfio_user";
+#[cfg(feature = "pci_support")]
 const VIRTIO_PCI_DEVICE_NAME_PREFIX: &str = "_virtio-pci";
 
 /// Errors associated with device manager
@@ -440,21 +456,27 @@ pub enum DeviceManagerError {
     /// Failed to remove DMA mapping handler from virtio-mem device.
     RemoveDmaMappingHandlerVirtioMem(virtio_devices::mem::Error),
 
+    #[cfg(feature = "pci_support")]
     /// Failed to create vfio-user client
     VfioUserCreateClient(vfio_user::Error),
 
+    #[cfg(feature = "pci_support")]
     /// Failed to create VFIO user device
     VfioUserCreate(VfioUserPciDeviceError),
 
+    #[cfg(feature = "pci_support")]
     /// Failed to map region from VFIO user device into guest
     VfioUserMapRegion(VfioUserPciDeviceError),
 
+    #[cfg(feature = "pci_support")]
     /// Failed to DMA map VFIO user device.
     VfioUserDmaMap(VfioUserPciDeviceError),
 
+    #[cfg(feature = "pci_support")]
     /// Failed to DMA unmap VFIO user device.
     VfioUserDmaUnmap(VfioUserPciDeviceError),
 
+    #[cfg(feature = "pci_support")]
     /// Failed to update memory mappings for VFIO user device
     UpdateMemoryForVfioUserPciDevice(VfioUserPciDeviceError),
 
@@ -561,10 +583,13 @@ pub(crate) struct AddressManager {
     pub(crate) io_bus: Arc<Bus>,
     pub(crate) mmio_bus: Arc<Bus>,
     vm: Arc<dyn hypervisor::Vm>,
+    #[cfg(feature = "pci_support")]
     device_tree: Arc<Mutex<DeviceTree>>,
+    #[cfg(feature = "pci_support")]
     pci_mmio_allocators: Vec<Arc<Mutex<AddressAllocator>>>,
 }
 
+#[cfg(feature = "pci_support")]
 impl DeviceRelocation for AddressManager {
     fn move_bar(
         &self,
@@ -796,6 +821,7 @@ impl Clone for PtyPair {
     }
 }
 
+#[cfg(feature = "pci_support")]
 #[derive(Clone)]
 pub enum PciDeviceHandle {
     Vfio(Arc<Mutex<VfioPciDevice>>),
@@ -874,6 +900,7 @@ pub struct DeviceManager {
     // Counter to keep track of the consumed device IDs.
     device_id_cnt: Wrapping<usize>,
 
+    #[cfg(feature = "pci_support")]
     pci_segments: Vec<PciSegment>,
 
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
@@ -884,18 +911,23 @@ pub struct DeviceManager {
     // Legacy Interrupt Manager
     legacy_interrupt_manager: Option<Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>>,
 
+    #[cfg(feature = "pci_support")]
     // Passthrough device handle
     passthrough_device: Option<VfioDeviceFd>,
 
+    #[cfg(feature = "pci_support")]
     // VFIO container
     // Only one container can be created, therefore it is stored as part of the
     // DeviceManager to be reused.
     vfio_container: Option<Arc<VfioContainer>>,
 
+    #[cfg(feature = "pci_support")]
     // Paravirtualized IOMMU
     iommu_device: Option<Arc<Mutex<virtio_devices::Iommu>>>,
+    #[cfg(feature = "pci_support")]
     iommu_mapping: Option<Arc<IommuMapping>>,
 
+    #[cfg(feature = "pci_support")]
     // PCI information about devices attached to the paravirtualized IOMMU
     // It contains the virtual IOMMU PCI BDF along with the list of PCI BDF
     // representing the devices attached to the virtual IOMMU. This is useful
@@ -959,6 +991,7 @@ pub struct DeviceManager {
     // Start time of the VM
     timestamp: Instant,
 
+    #[cfg(feature = "pci_support")]
     // Pending activations
     pending_activations: Arc<Mutex<Vec<VirtioPciDeviceActivator>>>,
 
@@ -984,29 +1017,38 @@ impl DeviceManager {
         timestamp: Instant,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         let device_tree = Arc::new(Mutex::new(DeviceTree::new()));
+        #[cfg(feature = "pci_support")]
+        let mut pci_mmio_allocators;
+        #[cfg(feature = "pci_support")]
+        let mut pci_segments;
+        #[cfg(feature = "pci_support")]
+        let num_pci_segments;
 
-        let num_pci_segments =
-            if let Some(platform_config) = config.lock().unwrap().platform.as_ref() {
-                platform_config.num_pci_segments
-            } else {
-                1
-            };
+        #[cfg(feature = "pci_support")]
+        {
+            num_pci_segments =
+                if let Some(platform_config) = config.lock().unwrap().platform.as_ref() {
+                    platform_config.num_pci_segments
+                } else {
+                    1
+                };
 
-        let start_of_device_area = memory_manager.lock().unwrap().start_of_device_area().0;
-        let end_of_device_area = memory_manager.lock().unwrap().end_of_device_area().0;
+            let start_of_device_area = memory_manager.lock().unwrap().start_of_device_area().0;
+            let end_of_device_area = memory_manager.lock().unwrap().end_of_device_area().0;
 
-        // Start each PCI segment range on a 4GiB boundary
-        let pci_segment_size = (end_of_device_area - start_of_device_area + 1)
-            / ((4 << 30) * num_pci_segments as u64)
-            * (4 << 30);
+            // Start each PCI segment range on a 4GiB boundary
+            let pci_segment_size = (end_of_device_area - start_of_device_area + 1)
+                / ((4 << 30) * num_pci_segments as u64)
+                * (4 << 30);
 
-        let mut pci_mmio_allocators = vec![];
-        for i in 0..num_pci_segments as u64 {
-            let mmio_start = start_of_device_area + i * pci_segment_size;
-            let allocator = Arc::new(Mutex::new(
-                AddressAllocator::new(GuestAddress(mmio_start), pci_segment_size).unwrap(),
-            ));
-            pci_mmio_allocators.push(allocator)
+            pci_mmio_allocators = vec![];
+            for i in 0..num_pci_segments as u64 {
+                let mmio_start = start_of_device_area + i * pci_segment_size;
+                let allocator = Arc::new(Mutex::new(
+                    AddressAllocator::new(GuestAddress(mmio_start), pci_segment_size).unwrap(),
+                ));
+                pci_mmio_allocators.push(allocator)
+            }
         }
 
         let address_manager = Arc::new(AddressManager {
@@ -1015,7 +1057,9 @@ impl DeviceManager {
             io_bus: Arc::new(Bus::new()),
             mmio_bus: Arc::new(Bus::new()),
             vm: vm.clone(),
+            #[cfg(feature = "pci_support")]
             device_tree: Arc::clone(&device_tree),
+            #[cfg(feature = "pci_support")]
             pci_mmio_allocators,
         });
 
@@ -1038,25 +1082,28 @@ impl DeviceManager {
             .allocate_platform_mmio_addresses(None, DEVICE_MANAGER_ACPI_SIZE as u64, None)
             .ok_or(DeviceManagerError::AllocateIoPort)?;
 
-        let mut pci_irq_slots = [0; 32];
-        PciSegment::reserve_legacy_interrupts_for_pci_devices(
-            &address_manager,
-            &mut pci_irq_slots,
-        )?;
-
-        let mut pci_segments = vec![PciSegment::new_default_segment(
-            &address_manager,
-            Arc::clone(&address_manager.pci_mmio_allocators[0]),
-            &pci_irq_slots,
-        )?];
-
-        for i in 1..num_pci_segments as usize {
-            pci_segments.push(PciSegment::new(
-                i as u16,
+        #[cfg(feature = "pci_support")]
+        {
+            let mut pci_irq_slots = [0; 32];
+            PciSegment::reserve_legacy_interrupts_for_pci_devices(
                 &address_manager,
-                Arc::clone(&address_manager.pci_mmio_allocators[i]),
+                &mut pci_irq_slots,
+            )?;
+
+            pci_segments = vec![PciSegment::new_default_segment(
+                &address_manager,
+                Arc::clone(&address_manager.pci_mmio_allocators[0]),
                 &pci_irq_slots,
-            )?);
+            )?];
+
+            for i in 1..num_pci_segments as usize {
+                pci_segments.push(PciSegment::new(
+                    i as u16,
+                    &address_manager,
+                    Arc::clone(&address_manager.pci_mmio_allocators[i]),
+                    &pci_irq_slots,
+                )?);
+            }
         }
 
         let device_manager = DeviceManager {
@@ -1075,11 +1122,17 @@ impl DeviceManager {
             device_id_cnt: Wrapping(0),
             msi_interrupt_manager,
             legacy_interrupt_manager: None,
+            #[cfg(feature = "pci_support")]
             passthrough_device: None,
+            #[cfg(feature = "pci_support")]
             vfio_container: None,
+            #[cfg(feature = "pci_support")]
             iommu_device: None,
+            #[cfg(feature = "pci_support")]
             iommu_mapping: None,
+            #[cfg(feature = "pci_support")]
             iommu_attached_devices: None,
+            #[cfg(feature = "pci_support")]
             pci_segments,
             device_tree,
             exit_evt: exit_evt.try_clone().map_err(DeviceManagerError::EventFd)?,
@@ -1210,6 +1263,7 @@ impl DeviceManager {
 
         virtio_devices.append(&mut self.make_virtio_devices()?);
 
+        #[cfg(feature = "pci_support")]
         self.add_pci_devices(virtio_devices.clone())?;
 
         self.virtio_devices = virtio_devices;
@@ -1229,6 +1283,7 @@ impl DeviceManager {
         self.device_id_cnt = state.device_id_cnt;
     }
 
+    #[cfg(feature = "pci_support")]
     fn get_msi_iova_space(&mut self) -> (u64, u64) {
         #[cfg(target_arch = "aarch64")]
         {
@@ -1249,6 +1304,7 @@ impl DeviceManager {
         &self.id_to_dev_info
     }
 
+    #[cfg(feature = "pci_support")]
     #[allow(unused_variables)]
     fn add_pci_devices(
         &mut self,
@@ -2092,6 +2148,7 @@ impl DeviceManager {
         // Add virtio-watchdog device
         devices.append(&mut self.make_virtio_watchdog_devices()?);
 
+        #[cfg(feature = "pci_support")]
         // Add vDPA devices if required
         devices.append(&mut self.make_vdpa_devices()?);
 
@@ -2608,6 +2665,7 @@ impl DeviceManager {
         let (region_base, region_size) = if let Some((base, size)) = region_range {
             // The memory needs to be 2MiB aligned in order to support
             // hugepages.
+            #[cfg(feature = "pci_support")]
             self.pci_segments[pmem_cfg.pci_segment as usize]
                 .allocator
                 .lock()
@@ -2619,10 +2677,23 @@ impl DeviceManager {
                 )
                 .ok_or(DeviceManagerError::PmemRangeAllocation)?;
 
+            #[cfg(not(feature = "pci_support"))]
+            self.address_manager
+                .allocator
+                .lock()
+                .unwrap()
+                .allocate_platform_mmio_addresses(
+                    Some(GuestAddress(base)),
+                    size as GuestUsize,
+                    Some(0x0020_0000),
+                )
+                .ok_or(DeviceManagerError::PmemRangeAllocation)?;
+
             (base, size)
         } else {
             // The memory needs to be 2MiB aligned in order to support
             // hugepages.
+            #[cfg(feature = "pci_support")]
             let base = self.pci_segments[pmem_cfg.pci_segment as usize]
                 .allocator
                 .lock()
@@ -2630,6 +2701,14 @@ impl DeviceManager {
                 .allocate(None, size as GuestUsize, Some(0x0020_0000))
                 .ok_or(DeviceManagerError::PmemRangeAllocation)?;
 
+            #[cfg(not(feature = "pci_support"))]
+            let base = self
+                .address_manager
+                .allocator
+                .lock()
+                .unwrap()
+                .allocate_platform_mmio_addresses(None, size as GuestUsize, Some(0x0020_0000))
+                .ok_or(DeviceManagerError::PmemRangeAllocation)?;
             (base.raw_value(), size)
         };
 
@@ -2916,6 +2995,7 @@ impl DeviceManager {
         Ok(devices)
     }
 
+    #[cfg(feature = "pci_support")]
     fn make_vdpa_device(
         &mut self,
         vdpa_cfg: &mut VdpaConfig,
@@ -2965,6 +3045,7 @@ impl DeviceManager {
         })
     }
 
+    #[cfg(feature = "pci_support")]
     fn make_vdpa_devices(&mut self) -> DeviceManagerResult<Vec<MetaVirtioDevice>> {
         let mut devices = Vec::new();
         // Add vdpa if required
@@ -3002,6 +3083,7 @@ impl DeviceManager {
         Err(DeviceManagerError::NoAvailableDeviceName)
     }
 
+    #[cfg(feature = "pci_support")]
     fn add_passthrough_device(
         &mut self,
         device_cfg: &mut DeviceConfig,
@@ -3020,6 +3102,7 @@ impl DeviceManager {
         self.add_vfio_device(device_cfg)
     }
 
+    #[cfg(feature = "pci_support")]
     fn create_vfio_container(&self) -> DeviceManagerResult<Arc<VfioContainer>> {
         let passthrough_device = self
             .passthrough_device
@@ -3035,6 +3118,7 @@ impl DeviceManager {
         ))
     }
 
+    #[cfg(feature = "pci_support")]
     fn add_vfio_device(
         &mut self,
         device_cfg: &mut DeviceConfig,
@@ -3190,6 +3274,7 @@ impl DeviceManager {
         Ok((pci_device_bdf, vfio_name))
     }
 
+    #[cfg(feature = "pci_support")]
     fn add_pci_device(
         &mut self,
         bus_device: Arc<Mutex<dyn BusDevice>>,
@@ -3246,6 +3331,7 @@ impl DeviceManager {
         Ok(new_resources)
     }
 
+    #[cfg(feature = "pci_support")]
     fn add_vfio_devices(&mut self) -> DeviceManagerResult<Vec<PciBdf>> {
         let mut iommu_attached_device_ids = Vec::new();
         let mut devices = self.config.lock().unwrap().devices.clone();
@@ -3265,6 +3351,7 @@ impl DeviceManager {
         Ok(iommu_attached_device_ids)
     }
 
+    #[cfg(feature = "pci_support")]
     fn add_vfio_user_device(
         &mut self,
         device_cfg: &mut UserDeviceConfig,
@@ -3372,6 +3459,7 @@ impl DeviceManager {
         Ok((pci_device_bdf, vfio_user_name))
     }
 
+    #[cfg(feature = "pci_support")]
     fn add_user_devices(&mut self) -> DeviceManagerResult<Vec<PciBdf>> {
         let mut user_devices = self.config.lock().unwrap().user_devices.clone();
 
@@ -3387,6 +3475,7 @@ impl DeviceManager {
         Ok(vec![])
     }
 
+    #[cfg(feature = "pci_support")]
     fn add_virtio_pci_device(
         &mut self,
         virtio_device: Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
@@ -3522,6 +3611,7 @@ impl DeviceManager {
         Ok(pci_device_bdf)
     }
 
+    #[cfg(feature = "pci_support")]
     fn pci_resources(
         &self,
         id: &str,
@@ -3573,7 +3663,7 @@ impl DeviceManager {
             .map(|ic| ic.clone() as Arc<Mutex<dyn InterruptController>>)
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "pci_support"))]
     // Used to provide a fast path for handling PIO exits
     pub fn pci_config_io(&self) -> Arc<Mutex<PciConfigIo>> {
         Arc::clone(self.pci_segments[0].pci_config_io.as_ref().unwrap())
@@ -3613,17 +3703,21 @@ impl DeviceManager {
             }
         }
 
-        // Take care of updating the memory for VFIO PCI devices.
-        if let Some(vfio_container) = &self.vfio_container {
-            vfio_container
-                .vfio_dma_map(
-                    new_region.start_addr().raw_value(),
-                    new_region.len() as u64,
-                    new_region.as_ptr() as u64,
-                )
-                .map_err(DeviceManagerError::UpdateMemoryForVfioPciDevice)?;
+        #[cfg(feature = "pci_support")]
+        {
+            // Take care of updating the memory for VFIO PCI devices.
+            if let Some(vfio_container) = &self.vfio_container {
+                vfio_container
+                    .vfio_dma_map(
+                        new_region.start_addr().raw_value(),
+                        new_region.len() as u64,
+                        new_region.as_ptr() as u64,
+                    )
+                    .map_err(DeviceManagerError::UpdateMemoryForVfioPciDevice)?;
+            }
         }
 
+        #[cfg(feature = "pci_support")]
         // Take care of updating the memory for vfio-user devices.
         {
             let device_tree = self.device_tree.lock().unwrap();
@@ -3671,6 +3765,7 @@ impl DeviceManager {
         return Ok(());
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_device(
         &mut self,
         device_cfg: &mut DeviceConfig,
@@ -3692,6 +3787,7 @@ impl DeviceManager {
         })
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_user_device(
         &mut self,
         device_cfg: &mut UserDeviceConfig,
@@ -3709,6 +3805,7 @@ impl DeviceManager {
         })
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn remove_device(&mut self, id: String) -> DeviceManagerResult<()> {
         // The node can be directly a PCI node in case the 'id' refers to a
         // VFIO device or a virtio-pci one.
@@ -3767,6 +3864,7 @@ impl DeviceManager {
         Ok(())
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn eject_device(&mut self, pci_segment_id: u16, device_id: u8) -> DeviceManagerResult<()> {
         info!(
             "Ejecting device_id = {} on segment_id={}",
@@ -3961,6 +4059,7 @@ impl DeviceManager {
         Ok(())
     }
 
+    #[cfg(feature = "pci_support")]
     fn hotplug_virtio_pci_device(
         &mut self,
         handle: MetaVirtioDevice,
@@ -3990,6 +4089,7 @@ impl DeviceManager {
         Ok(PciDeviceInfo { id: handle.id, bdf })
     }
 
+    #[cfg(feature = "pci_support")]
     fn is_iommu_segment(&self, pci_segment_id: u16) -> bool {
         self.config
             .lock()
@@ -4006,6 +4106,7 @@ impl DeviceManager {
             .unwrap_or_default()
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_disk(&mut self, disk_cfg: &mut DiskConfig) -> DeviceManagerResult<PciDeviceInfo> {
         self.validate_identifier(&disk_cfg.id)?;
 
@@ -4017,6 +4118,7 @@ impl DeviceManager {
         self.hotplug_virtio_pci_device(device)
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_fs(&mut self, fs_cfg: &mut FsConfig) -> DeviceManagerResult<PciDeviceInfo> {
         self.validate_identifier(&fs_cfg.id)?;
 
@@ -4024,6 +4126,7 @@ impl DeviceManager {
         self.hotplug_virtio_pci_device(device)
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_pmem(&mut self, pmem_cfg: &mut PmemConfig) -> DeviceManagerResult<PciDeviceInfo> {
         self.validate_identifier(&pmem_cfg.id)?;
 
@@ -4035,6 +4138,7 @@ impl DeviceManager {
         self.hotplug_virtio_pci_device(device)
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_net(&mut self, net_cfg: &mut NetConfig) -> DeviceManagerResult<PciDeviceInfo> {
         self.validate_identifier(&net_cfg.id)?;
 
@@ -4046,6 +4150,7 @@ impl DeviceManager {
         self.hotplug_virtio_pci_device(device)
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_vdpa(&mut self, vdpa_cfg: &mut VdpaConfig) -> DeviceManagerResult<PciDeviceInfo> {
         self.validate_identifier(&vdpa_cfg.id)?;
 
@@ -4057,6 +4162,7 @@ impl DeviceManager {
         self.hotplug_virtio_pci_device(device)
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn add_vsock(&mut self, vsock_cfg: &mut VsockConfig) -> DeviceManagerResult<PciDeviceInfo> {
         self.validate_identifier(&vsock_cfg.id)?;
 
@@ -4192,6 +4298,7 @@ impl DeviceManager {
             .map_err(DeviceManagerError::AArch64PowerButtonNotification);
     }
 
+    #[cfg(feature = "pci_support")]
     pub fn iommu_attached_devices(&self) -> &Option<(PciBdf, Vec<PciBdf>)> {
         &self.iommu_attached_devices
     }
@@ -4201,6 +4308,7 @@ impl DeviceManager {
         self.uefi_flash.as_ref().unwrap().clone()
     }
 
+    #[cfg(feature = "pci_support")]
     fn validate_identifier(&self, id: &Option<String>) -> DeviceManagerResult<()> {
         if let Some(id) = id {
             if id.starts_with("__") {
@@ -4236,105 +4344,106 @@ impl Aml for DeviceManager {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         #[cfg(target_arch = "aarch64")]
         use arch::aarch64::DeviceInfoForFdt;
+        #[cfg(feature = "pci_support")]
+        {
+            let mut pci_scan_methods = Vec::new();
+            for i in 0..self.pci_segments.len() {
+                pci_scan_methods.push(aml::MethodCall::new(
+                    format!("\\_SB_.PCI{:X}.PCNT", i).as_str().into(),
+                    vec![],
+                ));
+            }
+            let mut pci_scan_inner: Vec<&dyn Aml> = Vec::new();
+            for method in &pci_scan_methods {
+                pci_scan_inner.push(method)
+            }
 
-        let mut pci_scan_methods = Vec::new();
-        for i in 0..self.pci_segments.len() {
-            pci_scan_methods.push(aml::MethodCall::new(
-                format!("\\_SB_.PCI{:X}.PCNT", i).as_str().into(),
-                vec![],
-            ));
-        }
-        let mut pci_scan_inner: Vec<&dyn Aml> = Vec::new();
-        for method in &pci_scan_methods {
-            pci_scan_inner.push(method)
-        }
-
-        // PCI hotplug controller
-        aml::Device::new(
-            "_SB_.PHPR".into(),
-            vec![
-                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
-                &aml::Name::new("_STA".into(), &0x0bu8),
-                &aml::Name::new("_UID".into(), &"PCI Hotplug Controller"),
-                &aml::Mutex::new("BLCK".into(), 0),
-                &aml::Name::new(
-                    "_CRS".into(),
-                    &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
-                        aml::AddressSpaceCachable::NotCacheable,
+            // PCI hotplug controller
+            aml::Device::new(
+                "_SB_.PHPR".into(),
+                vec![
+                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0A06")),
+                    &aml::Name::new("_STA".into(), &0x0bu8),
+                    &aml::Name::new("_UID".into(), &"PCI Hotplug Controller"),
+                    &aml::Mutex::new("BLCK".into(), 0),
+                    &aml::Name::new(
+                        "_CRS".into(),
+                        &aml::ResourceTemplate::new(vec![&aml::AddressSpace::new_memory(
+                            aml::AddressSpaceCachable::NotCacheable,
+                            true,
+                            self.acpi_address.0 as u64,
+                            self.acpi_address.0 + DEVICE_MANAGER_ACPI_SIZE as u64 - 1,
+                        )]),
+                    ),
+                    // OpRegion and Fields map MMIO range into individual field values
+                    &aml::OpRegion::new(
+                        "PCST".into(),
+                        aml::OpRegionSpace::SystemMemory,
+                        self.acpi_address.0 as usize,
+                        DEVICE_MANAGER_ACPI_SIZE,
+                    ),
+                    &aml::Field::new(
+                        "PCST".into(),
+                        aml::FieldAccessType::DWord,
+                        aml::FieldUpdateRule::WriteAsZeroes,
+                        vec![
+                            aml::FieldEntry::Named(*b"PCIU", 32),
+                            aml::FieldEntry::Named(*b"PCID", 32),
+                            aml::FieldEntry::Named(*b"B0EJ", 32),
+                            aml::FieldEntry::Named(*b"PSEG", 32),
+                        ],
+                    ),
+                    &aml::Method::new(
+                        "PCEJ".into(),
+                        2,
                         true,
-                        self.acpi_address.0 as u64,
-                        self.acpi_address.0 + DEVICE_MANAGER_ACPI_SIZE as u64 - 1,
-                    )]),
-                ),
-                // OpRegion and Fields map MMIO range into individual field values
-                &aml::OpRegion::new(
-                    "PCST".into(),
-                    aml::OpRegionSpace::SystemMemory,
-                    self.acpi_address.0 as usize,
-                    DEVICE_MANAGER_ACPI_SIZE,
-                ),
-                &aml::Field::new(
-                    "PCST".into(),
-                    aml::FieldAccessType::DWord,
-                    aml::FieldUpdateRule::WriteAsZeroes,
-                    vec![
-                        aml::FieldEntry::Named(*b"PCIU", 32),
-                        aml::FieldEntry::Named(*b"PCID", 32),
-                        aml::FieldEntry::Named(*b"B0EJ", 32),
-                        aml::FieldEntry::Named(*b"PSEG", 32),
-                    ],
-                ),
-                &aml::Method::new(
-                    "PCEJ".into(),
-                    2,
+                        vec![
+                            // Take lock defined above
+                            &aml::Acquire::new("BLCK".into(), 0xffff),
+                            // Choose the current segment
+                            &aml::Store::new(&aml::Path::new("PSEG"), &aml::Arg(1)),
+                            // Write PCI bus number (in first argument) to I/O port via field
+                            &aml::ShiftLeft::new(&aml::Path::new("B0EJ"), &aml::ONE, &aml::Arg(0)),
+                            // Release lock
+                            &aml::Release::new("BLCK".into()),
+                            // Return 0
+                            &aml::Return::new(&aml::ZERO),
+                        ],
+                    ),
+                    &aml::Method::new("PSCN".into(), 0, true, pci_scan_inner),
+                ],
+            )
+            .append_aml_bytes(bytes);
+
+            for segment in &self.pci_segments {
+                segment.append_aml_bytes(bytes);
+            }
+
+            let mut mbrd_memory = Vec::new();
+
+            for segment in &self.pci_segments {
+                mbrd_memory.push(aml::Memory32Fixed::new(
                     true,
-                    vec![
-                        // Take lock defined above
-                        &aml::Acquire::new("BLCK".into(), 0xffff),
-                        // Choose the current segment
-                        &aml::Store::new(&aml::Path::new("PSEG"), &aml::Arg(1)),
-                        // Write PCI bus number (in first argument) to I/O port via field
-                        &aml::ShiftLeft::new(&aml::Path::new("B0EJ"), &aml::ONE, &aml::Arg(0)),
-                        // Release lock
-                        &aml::Release::new("BLCK".into()),
-                        // Return 0
-                        &aml::Return::new(&aml::ZERO),
-                    ],
-                ),
-                &aml::Method::new("PSCN".into(), 0, true, pci_scan_inner),
-            ],
-        )
-        .append_aml_bytes(bytes);
+                    segment.mmio_config_address as u32,
+                    layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT as u32,
+                ))
+            }
 
-        for segment in &self.pci_segments {
-            segment.append_aml_bytes(bytes);
+            let mut mbrd_memory_refs = Vec::new();
+            for mbrd_memory_ref in &mbrd_memory {
+                mbrd_memory_refs.push(mbrd_memory_ref as &dyn Aml);
+            }
+
+            aml::Device::new(
+                "_SB_.MBRD".into(),
+                vec![
+                    &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0C02")),
+                    &aml::Name::new("_UID".into(), &aml::ZERO),
+                    &aml::Name::new("_CRS".into(), &aml::ResourceTemplate::new(mbrd_memory_refs)),
+                ],
+            )
+            .append_aml_bytes(bytes);
         }
-
-        let mut mbrd_memory = Vec::new();
-
-        for segment in &self.pci_segments {
-            mbrd_memory.push(aml::Memory32Fixed::new(
-                true,
-                segment.mmio_config_address as u32,
-                layout::PCI_MMIO_CONFIG_SIZE_PER_SEGMENT as u32,
-            ))
-        }
-
-        let mut mbrd_memory_refs = Vec::new();
-        for mbrd_memory_ref in &mbrd_memory {
-            mbrd_memory_refs.push(mbrd_memory_ref as &dyn Aml);
-        }
-
-        aml::Device::new(
-            "_SB_.MBRD".into(),
-            vec![
-                &aml::Name::new("_HID".into(), &aml::EisaName::new("PNP0C02")),
-                &aml::Name::new("_UID".into(), &aml::ZERO),
-                &aml::Name::new("_CRS".into(), &aml::ResourceTemplate::new(mbrd_memory_refs)),
-            ],
-        )
-        .append_aml_bytes(bytes);
-
         // Serial device
         #[cfg(target_arch = "x86_64")]
         let serial_irq = 4;
@@ -4588,6 +4697,7 @@ impl BusDevice for DeviceManager {
     }
 
     fn write(&mut self, base: u64, offset: u64, data: &[u8]) -> Option<Arc<std::sync::Barrier>> {
+        #[cfg(feature = "pci_support")]
         match offset {
             B0EJ_FIELD_OFFSET => {
                 assert!(data.len() == B0EJ_FIELD_SIZE);

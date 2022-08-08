@@ -5,6 +5,7 @@
 use crate::cpu::CpuManager;
 use crate::device_manager::DeviceManager;
 use crate::memory_manager::MemoryManager;
+#[cfg(feature = "pci_support")]
 use crate::pci_segment::PciSegment;
 use crate::{GuestMemoryMmap, GuestRegionMmap};
 #[cfg(target_arch = "aarch64")]
@@ -17,6 +18,7 @@ use arch::DeviceType;
 #[cfg(feature = "acpi")]
 use arch::NumaNodes;
 use bitflags::bitflags;
+#[cfg(feature = "pci_support")]
 use pci::PciBdf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -242,6 +244,7 @@ fn create_facp_table(dsdt_offset: GuestAddress, device_manager: &Arc<Mutex<Devic
     facp
 }
 
+#[cfg(feature = "pci_support")]
 fn create_mcfg_table(pci_segments: &[PciSegment]) -> Sdt {
     let mut mcfg = Sdt::new(*b"MCFG", 36, 1, *b"CLOUDH", *b"CHMCFG  ", 1);
 
@@ -488,6 +491,7 @@ fn create_dbg2_table(base_address: u64) -> Sdt {
     dbg2
 }
 
+#[cfg(feature = "pci_support")]
 #[cfg(target_arch = "aarch64")]
 fn create_iort_table(pci_segments: &[PciSegment]) -> Sdt {
     const ACPI_IORT_NODE_ITS_GROUP: u8 = 0x00;
@@ -564,6 +568,7 @@ fn create_iort_table(pci_segments: &[PciSegment]) -> Sdt {
     iort
 }
 
+#[cfg(feature = "pci_support")]
 fn create_viot_table(iommu_bdf: &PciBdf, devices_bdf: &[PciBdf]) -> Sdt {
     // VIOT
     let mut viot = Sdt::new(*b"VIOT", 36, 0, *b"CLOUDH", *b"CHVIOT  ", 0);
@@ -661,16 +666,18 @@ pub fn create_acpi_tables(
         prev_tbl_len = gtdt.len() as u64;
         prev_tbl_off = gtdt_offset;
     }
-
-    // MCFG
-    let mcfg = create_mcfg_table(device_manager.lock().unwrap().pci_segments());
-    let mcfg_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
-    guest_mem
-        .write_slice(mcfg.as_slice(), mcfg_offset)
-        .expect("Error writing MCFG table");
-    tables.push(mcfg_offset.0);
-    prev_tbl_len = mcfg.len() as u64;
-    prev_tbl_off = mcfg_offset;
+    #[cfg(feature = "pci_support")]
+    {
+        // MCFG
+        let mcfg = create_mcfg_table(device_manager.lock().unwrap().pci_segments());
+        let mcfg_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
+        guest_mem
+            .write_slice(mcfg.as_slice(), mcfg_offset)
+            .expect("Error writing MCFG table");
+        tables.push(mcfg_offset.0);
+        prev_tbl_len = mcfg.len() as u64;
+        prev_tbl_off = mcfg_offset;
+    }
 
     // SPCR and DBG2
     #[cfg(target_arch = "aarch64")]
@@ -741,6 +748,7 @@ pub fn create_acpi_tables(
         prev_tbl_off = slit_offset;
     };
 
+    #[cfg(feature = "pci_support")]
     #[cfg(target_arch = "aarch64")]
     {
         let iort = create_iort_table(device_manager.lock().unwrap().pci_segments());
@@ -753,20 +761,23 @@ pub fn create_acpi_tables(
         prev_tbl_off = iort_offset;
     }
 
-    // VIOT
-    if let Some((iommu_bdf, devices_bdf)) = device_manager.lock().unwrap().iommu_attached_devices()
+    #[cfg(feature = "pci_support")]
     {
-        let viot = create_viot_table(iommu_bdf, devices_bdf);
+        // VIOT
+        if let Some((iommu_bdf, devices_bdf)) =
+            device_manager.lock().unwrap().iommu_attached_devices()
+        {
+            let viot = create_viot_table(iommu_bdf, devices_bdf);
 
-        let viot_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
-        guest_mem
-            .write_slice(viot.as_slice(), viot_offset)
-            .expect("Error writing VIOT table");
-        tables.push(viot_offset.0);
-        prev_tbl_len = viot.len() as u64;
-        prev_tbl_off = viot_offset;
+            let viot_offset = prev_tbl_off.checked_add(prev_tbl_len).unwrap();
+            guest_mem
+                .write_slice(viot.as_slice(), viot_offset)
+                .expect("Error writing VIOT table");
+            tables.push(viot_offset.0);
+            prev_tbl_len = viot.len() as u64;
+            prev_tbl_off = viot_offset;
+        }
     }
-
     // XSDT
     let mut xsdt = Sdt::new(*b"XSDT", 36, 1, *b"CLOUDH", *b"CHXSDT  ", 1);
     for table in tables {
