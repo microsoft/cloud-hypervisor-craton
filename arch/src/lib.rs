@@ -127,6 +127,8 @@ pub struct InitramfsConfig {
 /// Types of devices that can get attached to this platform.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub enum DeviceType {
+    /// Device Type: VirtioMmio.
+    VirtioMmio(u32),
     /// Device Type: Virtio.
     Virtio(u32),
     /// Device Type: Serial.

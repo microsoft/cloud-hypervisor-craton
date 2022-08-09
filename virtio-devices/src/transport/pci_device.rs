@@ -7,7 +7,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
 use super::VirtioPciCommonConfig;
-use crate::transport::VirtioTransport;
+use crate::transport::{Error, QueueState, VirtioTransport};
 use crate::GuestMemoryMmap;
 use crate::{
     ActivateResult, VirtioDevice, VirtioDeviceType, VirtioInterrupt, VirtioInterruptType,
@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
-use virtio_queue::{Error as QueueError, Queue};
+use virtio_queue::Queue;
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::dma_mapping::ExternalDmaMapping;
 use vm_device::interrupt::{
@@ -45,12 +45,6 @@ use vmm_sys_util::{errno::Result, eventfd::EventFd};
 
 /// Vector value used to disable MSI for a queue.
 const VIRTQ_MSI_NO_VECTOR: u16 = 0xffff;
-
-#[derive(Debug)]
-enum Error {
-    /// Failed to retrieve queue ring's index.
-    QueueRingIndex(QueueError),
-}
 
 #[allow(clippy::enum_variant_names)]
 enum PciCapabilityType {
@@ -267,16 +261,6 @@ const NOTIFY_OFF_MULTIPLIER: u32 = 4; // A dword per notification address.
 
 const VIRTIO_PCI_VENDOR_ID: u16 = 0x1af4;
 const VIRTIO_PCI_DEVICE_ID_BASE: u16 = 0x1040; // Add to device type to get device ID.
-
-#[derive(Versionize)]
-struct QueueState {
-    max_size: u16,
-    size: u16,
-    ready: bool,
-    desc_table: u64,
-    avail_ring: u64,
-    used_ring: u64,
-}
 
 #[derive(Versionize)]
 struct VirtioPciDeviceState {
