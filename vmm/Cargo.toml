@@ -6,6 +6,7 @@ edition = "2021"
 
 [features]
 default = []
+acpi = ["acpi_tables","devices/acpi", "arch/acpi"]
 amx = []
 cmos = ["devices/cmos"]
 fwdebug = ["devices/fwdebug"]
@@ -16,7 +17,7 @@ mshv = ["hypervisor/mshv", "virtio-devices/mshv", "vfio-ioctls/mshv", "vm-device
 tdx = ["arch/tdx", "hypervisor/tdx"]
 
 [dependencies]
-acpi_tables = { path = "../acpi_tables" }
+acpi_tables = { path = "../acpi_tables", optional = true }
 anyhow = "1.0.58"
 arc-swap = "1.5.0"
 arch = { path = "../arch" }
