@@ -15,6 +15,7 @@ guest_debug = ["kvm"]
 kvm = ["hypervisor/kvm", "vfio-ioctls/kvm", "vm-device/kvm", "pci/kvm"]
 mshv = ["hypervisor/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 pci_support = ["pci", "virtio-devices/pci_support"]
+mmio_support = ["virtio-devices/mmio_support"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
 
 [dependencies]

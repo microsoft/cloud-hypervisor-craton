@@ -525,6 +525,9 @@ fn create_devices_node<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Buil
             DeviceType::Virtio(_) => {
                 ordered_virtio_device.push(info);
             }
+            DeviceType::VirtioMmio(_) => {
+                ordered_virtio_device.push(info);
+            }
         }
     }
 
