@@ -6,6 +6,7 @@ edition = "2021"
 
 [features]
 default = []
+mmio_support = []
 pci_support = []
 
 [dependencies]

@@ -64,6 +64,7 @@ guest_debug = ["vmm/guest_debug"]
 kvm = ["vmm/kvm"]
 mshv = ["vmm/mshv"]
 pci = ["vmm/pci_support", "devices/pci_support"]
+mmio = ["vmm/mmio_support", "devices/mmio_support"]
 tdx = ["vmm/tdx"]
 
 [workspace]

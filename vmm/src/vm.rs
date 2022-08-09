@@ -112,6 +112,9 @@ use vmm_sys_util::terminal::Terminal;
 /// Errors associated with VM management
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Couldn't find uio ram device: {0}")]
+    NoPciSupport(#[source] vmm_sys_util::errno::Error),
+
     #[error("Cannot open kernel file: {0}")]
     KernelFile(#[source] io::Error),
 
@@ -521,13 +524,6 @@ impl Vm {
             .validate()
             .map_err(Error::ConfigValidation)?;
 
-        #[cfg(target_arch = "x86_64")]
-        let load_payload_handle = if !restoring {
-            Self::load_payload_async(&memory_manager, &config)?
-        } else {
-            None
-        };
-
         info!("Booting VM from config: {:?}", &config);
 
         #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
@@ -562,6 +558,13 @@ impl Vm {
             timestamp,
         )
         .map_err(Error::DeviceManager)?;
+
+        #[cfg(target_arch = "x86_64")]
+        let load_payload_handle = if !restoring {
+            Self::load_payload_async(&memory_manager, &config, device_manager.clone())?
+        } else {
+            None
+        };
 
         let memory = memory_manager.lock().unwrap().guest_memory();
         #[cfg(target_arch = "x86_64")]
@@ -958,14 +961,13 @@ impl Vm {
 
     fn generate_cmdline(
         payload: &PayloadConfig,
-        #[cfg(target_arch = "aarch64")] device_manager: &Arc<Mutex<DeviceManager>>,
+        device_manager: &Arc<Mutex<DeviceManager>>,
     ) -> Result<Cmdline> {
         let mut cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
         if let Some(s) = payload.cmdline.as_ref() {
             cmdline.insert_str(s).map_err(Error::CmdLineInsertStr)?;
         }
 
-        #[cfg(target_arch = "aarch64")]
         for entry in device_manager.lock().unwrap().cmdline_additions() {
             cmdline.insert_str(entry).map_err(Error::CmdLineInsertStr)?;
         }
@@ -1108,6 +1110,7 @@ impl Vm {
     fn load_payload(
         payload: &PayloadConfig,
         memory_manager: Arc<Mutex<MemoryManager>>,
+        device_manager: &Arc<Mutex<DeviceManager>>,
     ) -> Result<EntryPoint> {
         match (
             &payload.firmware,
@@ -1121,7 +1124,7 @@ impl Vm {
             }
             (None, Some(kernel), _, _) => {
                 let kernel = File::open(kernel).map_err(Error::KernelFile)?;
-                let cmdline = Self::generate_cmdline(payload)?;
+                let cmdline = Self::generate_cmdline(payload, device_manager)?;
                 Self::load_kernel(kernel, Some(cmdline), memory_manager)
             }
             _ => Err(Error::InvalidPayload),
@@ -1132,6 +1135,7 @@ impl Vm {
     fn load_payload_async(
         memory_manager: &Arc<Mutex<MemoryManager>>,
         config: &Arc<Mutex<VmConfig>>,
+        device_manager: Arc<Mutex<DeviceManager>>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
         #[cfg(feature = "tdx")]
@@ -1150,7 +1154,7 @@ impl Vm {
 
                 std::thread::Builder::new()
                     .name("payload_loader".into())
-                    .spawn(move || Self::load_payload(&payload, memory_manager))
+                    .spawn(move || Self::load_payload(&payload, memory_manager, &device_manager))
                     .map_err(Error::KernelLoadThreadSpawn)
             })
             .transpose()
@@ -1237,6 +1241,9 @@ impl Vm {
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
         #[cfg(feature = "pci_support")]
         let mut pci_space_info: Vec<PciSpaceInfo> = Vec::new();
+        #[cfg(feature = "mmio_support")]
+        let pci_space_info: Vec<PciSpaceInfo> = Vec::new();
+
         let initramfs_config = match self.initramfs {
             Some(_) => Some(self.load_initramfs(&mem)?),
             None => None,
@@ -1262,6 +1269,7 @@ impl Vm {
                 pci_space_info.push(pci_space);
             }
         }
+
         let virtio_iommu_bdf = if cfg!(feature = "pci_support") {
             self.device_manager
                 .lock()
@@ -1272,6 +1280,7 @@ impl Vm {
         } else {
             None
         };
+
         let vgic = self
             .device_manager
             .lock()
@@ -1511,6 +1520,12 @@ impl Vm {
         error!("Could not find the memory zone {} for the resize", id);
         Err(Error::ResizeZone)
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn add_device(&mut self, mut _device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_device(&mut self, mut device_cfg: DeviceConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1535,6 +1550,11 @@ impl Vm {
 
         Ok(pci_device_info)
     }
+    #[cfg(feature = "mmio_support")]
+    pub fn add_user_device(&mut self, mut _device_cfg: UserDeviceConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_user_device(&mut self, mut device_cfg: UserDeviceConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1559,6 +1579,12 @@ impl Vm {
 
         Ok(pci_device_info)
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn remove_device(&mut self, _id: String) -> Result<()> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn remove_device(&mut self, id: String) -> Result<()> {
         self.device_manager
@@ -1620,6 +1646,12 @@ impl Vm {
             .map_err(Error::DeviceManager)?;
         Ok(())
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn add_disk(&mut self, mut _disk_cfg: DiskConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_disk(&mut self, mut disk_cfg: DiskConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1644,6 +1676,12 @@ impl Vm {
 
         Ok(pci_device_info)
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn add_fs(&mut self, mut _fs_cfg: FsConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_fs(&mut self, mut fs_cfg: FsConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1668,6 +1706,12 @@ impl Vm {
 
         Ok(pci_device_info)
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn add_pmem(&mut self, mut _pmem_cfg: PmemConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_pmem(&mut self, mut pmem_cfg: PmemConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1692,6 +1736,12 @@ impl Vm {
 
         Ok(pci_device_info)
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn add_net(&mut self, mut _net_cfg: NetConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_net(&mut self, mut net_cfg: NetConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1716,6 +1766,12 @@ impl Vm {
 
         Ok(pci_device_info)
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn add_vdpa(&mut self, mut _vdpa_cfg: VdpaConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_vdpa(&mut self, mut vdpa_cfg: VdpaConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1740,6 +1796,12 @@ impl Vm {
 
         Ok(pci_device_info)
     }
+
+    #[cfg(feature = "mmio_support")]
+    pub fn add_vsock(&mut self, mut _vsock_cfg: VsockConfig) -> Result<PciDeviceInfo> {
+        Err(Error::NoPciSupport(vmm_sys_util::errno::Error::new(1)))
+    }
+
     #[cfg(feature = "pci_support")]
     pub fn add_vsock(&mut self, mut vsock_cfg: VsockConfig) -> Result<PciDeviceInfo> {
         let pci_device_info = self
@@ -1973,6 +2035,7 @@ impl Vm {
                     info!("Copying payload parameters to guest memory");
                     let cmdline = Self::generate_cmdline(
                         self.config.lock().unwrap().payload.as_ref().unwrap(),
+                        &self.device_manager,
                     )?;
                     mem.write_slice(cmdline.as_str().as_bytes(), GuestAddress(section.address))
                         .unwrap();
