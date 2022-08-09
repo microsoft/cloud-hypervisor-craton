@@ -16,7 +16,9 @@ use crate::config::{
 use crate::device_tree::{DeviceNode, DeviceTree};
 use crate::interrupt::LegacyUserspaceInterruptManager;
 use crate::interrupt::MsiInterruptManager;
-use crate::memory_manager::{Error as MemoryManagerError, MemoryManager, MEMORY_MANAGER_ACPI_SIZE};
+#[cfg(feature = "acpi")]
+use crate::memory_manager::MEMORY_MANAGER_ACPI_SIZE;
+use crate::memory_manager::{Error as MemoryManagerError, MemoryManager};
 use crate::pci_segment::PciSegment;
 use crate::seccomp_filters::{get_seccomp_filter, Thread};
 use crate::serial_manager::{Error as SerialManagerError, SerialManager};
@@ -26,12 +28,16 @@ use crate::GuestMemoryMmap;
 use crate::GuestRegionMmap;
 use crate::PciDeviceInfo;
 use crate::{device_node, DEVICE_MANAGER_SNAPSHOT_ID};
+#[cfg(feature = "acpi")]
 use acpi_tables::sdt::GenericAddress;
+#[cfg(feature = "acpi")]
 use acpi_tables::{aml, aml::Aml};
 use anyhow::anyhow;
+#[cfg(feature = "acpi")]
 use arch::layout;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{APIC_START, IOAPIC_SIZE, IOAPIC_START};
+#[cfg(feature = "acpi")]
 use arch::NumaNodes;
 #[cfg(target_arch = "aarch64")]
 use arch::{DeviceType, MmioDeviceInfo};
@@ -478,6 +484,7 @@ pub enum DeviceManagerError {
 }
 pub type DeviceManagerResult<T> = result::Result<T, DeviceManagerError>;
 
+#[cfg(feature = "acpi")]
 const DEVICE_MANAGER_ACPI_SIZE: usize = 0x10;
 
 const TIOCSPTLCK: libc::c_int = 0x4004_5431;
@@ -845,6 +852,7 @@ pub struct DeviceManager {
     #[cfg(target_arch = "aarch64")]
     cmdline_additions: Vec<String>,
 
+    #[cfg(feature = "acpi")]
     // ACPI GED notification device
     ged_notification_device: Option<Arc<Mutex<devices::AcpiGedDevice>>>,
 
@@ -908,6 +916,7 @@ pub struct DeviceManager {
     // seccomp action
     seccomp_action: SeccompAction,
 
+    #[cfg(feature = "acpi")]
     // List of guest NUMA nodes.
     numa_nodes: NumaNodes,
 
@@ -918,8 +927,10 @@ pub struct DeviceManager {
     // activation and thus start the threads from the VMM thread
     activate_evt: EventFd,
 
+    #[cfg(feature = "acpi")]
     acpi_address: GuestAddress,
 
+    #[cfg(feature = "acpi")]
     selected_segment: usize,
 
     // Possible handle to the virtio-mem device
@@ -965,7 +976,7 @@ impl DeviceManager {
         exit_evt: &EventFd,
         reset_evt: &EventFd,
         seccomp_action: SeccompAction,
-        numa_nodes: NumaNodes,
+        #[cfg(feature = "acpi")] numa_nodes: NumaNodes,
         activate_evt: &EventFd,
         force_iommu: bool,
         restoring: bool,
@@ -1019,7 +1030,7 @@ impl DeviceManager {
                 Arc::clone(&address_manager.allocator),
                 vm,
             ));
-
+        #[cfg(feature = "acpi")]
         let acpi_address = address_manager
             .allocator
             .lock()
@@ -1055,6 +1066,7 @@ impl DeviceManager {
             interrupt_controller: None,
             #[cfg(target_arch = "aarch64")]
             cmdline_additions: Vec::new(),
+            #[cfg(feature = "acpi")]
             ged_notification_device: None,
             config,
             memory_manager,
@@ -1075,12 +1087,15 @@ impl DeviceManager {
             #[cfg(target_arch = "aarch64")]
             id_to_dev_info: HashMap::new(),
             seccomp_action,
+            #[cfg(feature = "acpi")]
             numa_nodes,
             balloon: None,
             activate_evt: activate_evt
                 .try_clone()
                 .map_err(DeviceManagerError::EventFd)?,
+            #[cfg(feature = "acpi")]
             acpi_address,
+            #[cfg(feature = "acpi")]
             selected_segment: 0,
             serial_pty: None,
             serial_manager: None,
@@ -1101,7 +1116,7 @@ impl DeviceManager {
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
-
+        #[cfg(feature = "acpi")]
         address_manager
             .mmio_bus
             .insert(
@@ -1147,7 +1162,7 @@ impl DeviceManager {
         > = Arc::new(LegacyUserspaceInterruptManager::new(Arc::clone(
             &interrupt_controller,
         )));
-
+        #[cfg(feature = "acpi")]
         {
             if let Some(acpi_address) = self.memory_manager.lock().unwrap().acpi_address() {
                 self.address_manager
@@ -1170,7 +1185,7 @@ impl DeviceManager {
 
         #[cfg(target_arch = "aarch64")]
         self.add_legacy_devices(&legacy_interrupt_manager)?;
-
+        #[cfg(feature = "acpi")]
         {
             self.ged_notification_device = self.add_acpi_devices(
                 &legacy_interrupt_manager,
@@ -1394,6 +1409,7 @@ impl DeviceManager {
         Ok(interrupt_controller)
     }
 
+    #[cfg(feature = "acpi")]
     fn add_acpi_devices(
         &mut self,
         interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
@@ -2773,6 +2789,7 @@ impl DeviceManager {
             if let Some(virtio_mem_zone) = memory_zone.virtio_mem_zone() {
                 info!("Creating virtio-mem device: id = {}", memory_zone_id);
 
+                #[cfg(feature = "acpi")]
                 let node_id = numa_node_id_from_memory_zone_id(&self.numa_nodes, memory_zone_id)
                     .map(|i| i as u16);
 
@@ -2785,6 +2802,7 @@ impl DeviceManager {
                             .new_resize_sender()
                             .map_err(DeviceManagerError::CreateResizeSender)?,
                         self.seccomp_action.clone(),
+                        #[cfg(feature = "acpi")]
                         node_id,
                         virtio_mem_zone.hotplugged_size(),
                         virtio_mem_zone.hugepages(),
@@ -3562,6 +3580,7 @@ impl DeviceManager {
         Arc::clone(self.pci_segments[0].pci_config_io.as_ref().unwrap())
     }
 
+    #[cfg(feature = "acpi")]
     pub(crate) fn pci_segments(&self) -> &Vec<PciSegment> {
         &self.pci_segments
     }
@@ -3640,6 +3659,7 @@ impl DeviceManager {
         &self,
         _notification_type: AcpiNotificationFlags,
     ) -> DeviceManagerResult<()> {
+        #[cfg(feature = "acpi")]
         return self
             .ged_notification_device
             .as_ref()
@@ -3648,6 +3668,8 @@ impl DeviceManager {
             .unwrap()
             .notify(_notification_type)
             .map_err(DeviceManagerError::HotPlugNotification);
+        #[cfg(not(feature = "acpi"))]
+        return Ok(());
     }
 
     pub fn add_device(
@@ -4121,7 +4143,7 @@ impl DeviceManager {
 
         Ok(())
     }
-
+    #[cfg(feature = "acpi")]
     #[cfg(target_arch = "x86_64")]
     pub fn notify_power_button(&self) -> DeviceManagerResult<()> {
         self.ged_notification_device
@@ -4140,22 +4162,35 @@ impl DeviceManager {
         // 2. Users will use ACPI+UEFI boot.
 
         // Trigger a GPIO pin 3 event to satisify use case 1.
-        self.gpio_device
+
+        // Trigger a GED power button event to satisify use case 2.
+        #[cfg(feature = "acpi")]
+        {
+            self.gpio_device
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .trigger_key(3)
+                .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
+            return self
+                .ged_notification_device
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .notify(AcpiNotificationFlags::POWER_BUTTON_CHANGED)
+                .map_err(DeviceManagerError::PowerButtonNotification);
+        }
+        #[cfg(not(feature = "acpi"))]
+        return self
+            .gpio_device
             .as_ref()
             .unwrap()
             .lock()
             .unwrap()
             .trigger_key(3)
-            .map_err(DeviceManagerError::AArch64PowerButtonNotification)?;
-        // Trigger a GED power button event to satisify use case 2.
-        return self
-            .ged_notification_device
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .notify(AcpiNotificationFlags::POWER_BUTTON_CHANGED)
-            .map_err(DeviceManagerError::PowerButtonNotification);
+            .map_err(DeviceManagerError::AArch64PowerButtonNotification);
     }
 
     pub fn iommu_attached_devices(&self) -> &Option<(PciBdf, Vec<PciBdf>)> {
@@ -4186,6 +4221,7 @@ impl DeviceManager {
     }
 }
 
+#[cfg(feature = "acpi")]
 fn numa_node_id_from_memory_zone_id(numa_nodes: &NumaNodes, memory_zone_id: &str) -> Option<u32> {
     for (numa_node_id, numa_node) in numa_nodes.iter() {
         if numa_node.memory_zones.contains(&memory_zone_id.to_owned()) {
@@ -4196,6 +4232,7 @@ fn numa_node_id_from_memory_zone_id(numa_nodes: &NumaNodes, memory_zone_id: &str
     None
 }
 
+#[cfg(feature = "acpi")]
 impl Aml for DeviceManager {
     fn append_aml_bytes(&self, bytes: &mut Vec<u8>) {
         #[cfg(target_arch = "aarch64")]
@@ -4488,15 +4525,24 @@ impl Migratable for DeviceManager {
     }
 }
 
+#[cfg(feature = "acpi")]
 const PCIU_FIELD_OFFSET: u64 = 0;
+#[cfg(feature = "acpi")]
 const PCID_FIELD_OFFSET: u64 = 4;
+#[cfg(feature = "acpi")]
 const B0EJ_FIELD_OFFSET: u64 = 8;
+#[cfg(feature = "acpi")]
 const PSEG_FIELD_OFFSET: u64 = 12;
+#[cfg(feature = "acpi")]
 const PCIU_FIELD_SIZE: usize = 4;
+#[cfg(feature = "acpi")]
 const PCID_FIELD_SIZE: usize = 4;
+#[cfg(feature = "acpi")]
 const B0EJ_FIELD_SIZE: usize = 4;
+#[cfg(feature = "acpi")]
 const PSEG_FIELD_SIZE: usize = 4;
 
+#[cfg(feature = "acpi")]
 impl BusDevice for DeviceManager {
     fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
         match offset {

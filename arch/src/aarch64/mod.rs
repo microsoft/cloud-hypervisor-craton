@@ -235,6 +235,6 @@ mod tests {
         assert_eq!(RegionType::Ram, regions[3].2);
         assert_eq!(RegionType::Reserved, regions[5].2);
         assert_eq!(RegionType::Ram, regions[4].2);
-        assert_eq!(((1usize << 32) - ram_32bit_space_size), regions[4].1);
+        assert_eq!(1usize << 32, regions[4].1);
     }
 }

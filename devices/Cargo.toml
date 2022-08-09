@@ -5,7 +5,7 @@ authors = ["The Chromium OS Authors"]
 edition = "2021"
 
 [dependencies]
-acpi_tables = { path = "../acpi_tables" }
+acpi_tables = { path = "../acpi_tables", optional = true }
 anyhow = "1.0.62"
 arch = { path = "../arch" }
 bitflags = "1.3.2"
@@ -24,6 +24,7 @@ vmm-sys-util = "0.10.0"
 arch = { path = "../arch" }
 
 [features]
+acpi = ["acpi_tables"]
 default = []
 cmos = []
 fwdebug = []
