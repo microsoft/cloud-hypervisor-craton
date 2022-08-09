@@ -167,7 +167,10 @@ pub enum ClockData {
 #[cfg(target_arch = "x86_64")]
 impl ClockData {
     pub fn reset_flags(&mut self) {
-        if let ClockData::Kvm(s) = self { s.flags = 0 }
+        #[cfg(feature = "kvm")]
+        if let ClockData::Kvm(s) = self {
+            s.flags = 0
+        }
     }
 }
 

@@ -6,9 +6,11 @@ edition = "2021"
 
 [features]
 default = []
+acpi = ["acpi_tables"]
 tdx = []
 
 [dependencies]
+acpi_tables = { path = "../acpi_tables", optional = true }
 anyhow = "1.0.62"
 byteorder = "1.4.3"
 hypervisor = { path = "../hypervisor" }

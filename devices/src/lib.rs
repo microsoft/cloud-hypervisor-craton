@@ -12,6 +12,7 @@ extern crate bitflags;
 #[macro_use]
 extern crate log;
 
+#[cfg(feature = "acpi")]
 pub mod acpi;
 #[cfg(target_arch = "aarch64")]
 pub mod gic;
@@ -20,6 +21,7 @@ pub mod interrupt_controller;
 pub mod ioapic;
 pub mod legacy;
 
+#[cfg(feature = "acpi")]
 pub use self::acpi::{AcpiGedDevice, AcpiPmTimerDevice, AcpiShutdownDevice};
 
 bitflags! {

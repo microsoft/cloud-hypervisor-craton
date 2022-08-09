@@ -883,7 +883,7 @@ fn test_vhost_user_net(
         );
 
         // ACPI feature is needed.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
         {
             guest.enable_memory_hotplug();
 
@@ -1022,7 +1022,7 @@ fn test_vhost_user_blk(
         );
 
         // ACPI feature is needed.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
         {
             guest.enable_memory_hotplug();
 
@@ -1238,7 +1238,7 @@ fn _test_virtio_fs(
         );
 
         // ACPI feature is needed.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "acpi"))]
         {
             guest.enable_memory_hotplug();
 
@@ -3698,6 +3698,7 @@ mod common_parallel {
         let r = std::panic::catch_unwind(|| {
             guest.wait_vm_boot(None).unwrap();
 
+            #[cfg(feature = "acpi")]
             assert!(guest
                 .does_device_vendor_pair_match("0x1043", "0x1af4")
                 .unwrap_or_default());
@@ -9013,7 +9014,7 @@ mod live_migration {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "acpi"))]
 mod aarch64_acpi {
     use crate::*;
 
