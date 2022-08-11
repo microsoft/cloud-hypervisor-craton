@@ -24,6 +24,7 @@ vmm-sys-util = "0.10.0"
 arch = { path = "../arch" }
 
 [features]
+craton = []
 acpi = ["acpi_tables"]
 default = []
 cmos = []
