@@ -3,6 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#[cfg(all(feature = "craton", not(target_arch = "aarch64")))]
+compile_error!("Craton feature is only compatible with target_arch=aarch64");
+
+#[cfg(all(feature = "craton", any(feature = "acpi", feature = "pci_support")))]
+compile_error!("Craton feature is not compatible with acpi,pci features");
+
 #[macro_use]
 extern crate event_monitor;
 #[macro_use]
