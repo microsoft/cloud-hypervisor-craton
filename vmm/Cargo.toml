@@ -6,7 +6,7 @@ edition = "2021"
 
 [features]
 default = []
-craton = []
+craton = ["devices/craton"]
 acpi = ["acpi_tables","devices/acpi", "arch/acpi"]
 amx = []
 cmos = ["devices/cmos"]

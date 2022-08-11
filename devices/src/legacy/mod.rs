@@ -18,6 +18,8 @@ mod rtc_pl031;
 mod serial;
 #[cfg(target_arch = "aarch64")]
 mod uart_pl011;
+#[cfg(feature = "craton")]
+pub mod uio;
 
 pub use self::cmos::Cmos;
 #[cfg(target_arch = "x86_64")]
