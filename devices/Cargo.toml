@@ -22,6 +22,7 @@ vm-migration = { path = "../vm-migration" }
 vmm-sys-util = "0.9.0"
 
 [features]
+craton = []
 acpi = ["acpi_tables"]
 default = []
 cmos = []
