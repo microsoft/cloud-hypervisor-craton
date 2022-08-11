@@ -52,6 +52,7 @@ test_infra = { path = "test_infra" }
 wait-timeout = "0.2.0"
 
 [features]
+craton = ["kvm", "mmio", "vmm/craton"]
 default = ["common", "kvm"]
 # Common features for all hypervisors
 common = ["acpi", "fwdebug", "pci"]
