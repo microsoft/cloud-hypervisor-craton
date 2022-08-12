@@ -3493,7 +3493,7 @@ mod tests {
                 },
             ),
             (
-                (DeviceType::Virtio(1), "virtio".to_string()),
+                (DeviceType::VirtioMmio(1), "virtio".to_string()),
                 MmioDeviceInfo {
                     addr: LEN,
                     len: LEN,
