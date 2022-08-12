@@ -455,6 +455,21 @@ impl Vmm {
                 .map_err(VmError::EventFdClone)?;
 
             if let Some(ref vm_config) = self.vm_config {
+                #[cfg(feature = "craton")]
+                let vm = Vm::new_craton(
+                    Arc::clone(vm_config),
+                    exit_evt,
+                    reset_evt,
+                    #[cfg(feature = "gdb")]
+                    vm_debug_evt,
+                    &self.seccomp_action,
+                    self.hypervisor.clone(),
+                    activate_evt,
+                    None,
+                    None,
+                    None,
+                )?;
+                #[cfg(not(feature = "craton"))]
                 let vm = Vm::new(
                     Arc::clone(vm_config),
                     exit_evt,
