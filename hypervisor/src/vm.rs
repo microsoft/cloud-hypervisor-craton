@@ -268,6 +268,14 @@ pub trait Vm: Send + Sync + Any {
     fn create_irq_chip(&self) -> Result<()>;
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
+    /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
+    #[cfg(feature = "craton")]
+    fn register_irqfd_with_resample(
+        &self,
+        fd: &EventFd,
+        resamplefd: &EventFd,
+        gsi: u32,
+    ) -> Result<()>;
     /// Unregister an event that will, when signaled, trigger the `gsi` IRQ.
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding

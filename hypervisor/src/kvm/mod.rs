@@ -381,6 +381,20 @@ impl vm::Vm for KvmVm {
             .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))
     }
     ///
+    /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
+    ///
+    #[cfg(feature = "craton")]
+    fn register_irqfd_with_resample(
+        &self,
+        fd: &EventFd,
+        resamplefd: &EventFd,
+        gsi: u32,
+    ) -> vm::Result<()> {
+        self.fd
+            .register_irqfd_with_resample(fd, resamplefd, gsi)
+            .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))
+    }
+    ///
     /// Unregisters an event that will, when signaled, trigger the `gsi` IRQ.
     ///
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {
