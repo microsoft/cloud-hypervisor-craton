@@ -69,7 +69,7 @@ pub fn configure_vcpu(
         vcpu.setup_regs(
             id,
             kernel_entry_point.entry_addr.raw_value(),
-            super::layout::FDT_START.raw_value(),
+            get_fdt_addr().raw_value(),
         )
         .map_err(Error::RegsConfiguration)?;
     }
@@ -198,6 +198,47 @@ pub fn initramfs_load_addr(
         }
         None => Err(super::Error::PlatformSpecific(Error::InitramfsAddress)),
     }
+}
+
+static mut KERNEL_START: GuestAddress = layout::KERNEL_START;
+static mut RAM_START: GuestAddress = layout::RAM_START;
+static mut FDT_START: GuestAddress = layout::FDT_START;
+
+pub fn set_kernel_start(start: GuestAddress) {
+    unsafe {
+        KERNEL_START = start;
+    };
+}
+
+pub fn set_ram_start(start: GuestAddress) {
+    unsafe {
+        RAM_START = start;
+    };
+}
+
+pub fn set_fdt_addr(addr: GuestAddress) {
+    unsafe {
+        FDT_START = addr;
+    };
+}
+
+/// Returns the memory address where the kernel could be loaded.
+pub fn get_kernel_start() -> GuestAddress {
+    unsafe { KERNEL_START }
+}
+
+pub fn get_ram_start() -> GuestAddress {
+    unsafe { RAM_START }
+}
+
+///Return guest memory address where the uefi should be loaded.
+pub fn get_uefi_start() -> GuestAddress {
+    layout::UEFI_START
+}
+
+// Auxiliary function to get the address where the device tree blob is loaded.
+fn get_fdt_addr() -> GuestAddress {
+    unsafe { FDT_START }
 }
 
 pub fn get_host_cpu_phys_bits() -> u8 {
