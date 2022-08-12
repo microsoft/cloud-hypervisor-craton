@@ -153,7 +153,7 @@ pub fn fdt_file_to_vec(file: &mut File) -> io::Result<Vec<u8>> {
 pub fn write_fdt_to_memory(fdt_final: Vec<u8>, guest_mem: &GuestMemoryMmap) -> Result<()> {
     // Write FDT to memory.
     guest_mem
-        .write_slice(fdt_final.as_slice(), super::layout::FDT_START)
+        .write_slice(fdt_final.as_slice(), super::get_fdt_addr())
         .map_err(Error::WriteFdtToMemory)?;
     Ok(())
 }
@@ -271,8 +271,8 @@ fn create_memory_node(
         let last_addr = guest_mem.last_addr().raw_value();
         if last_addr < super::layout::MEM_32BIT_RESERVED_START.raw_value() {
             // Case 1: all RAM is under the hole
-            let mem_size = last_addr - super::layout::RAM_START.raw_value() + 1;
-            let mem_reg_prop = [super::layout::RAM_START.raw_value() as u64, mem_size as u64];
+            let mem_size = last_addr - super::get_ram_start().raw_value() + 1;
+            let mem_reg_prop = [super::get_ram_start().raw_value() as u64, mem_size as u64];
             let memory_node = fdt.begin_node("memory")?;
             fdt.property_string("device_type", "memory")?;
             fdt.property_array_u64("reg", &mem_reg_prop)?;
