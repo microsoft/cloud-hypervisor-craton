@@ -121,6 +121,9 @@ pub enum Error {
     #[error("Cannot open the device tree file: {0}")]
     DtbFile(io::Error),
 
+    #[error("Cannot find a uio ram device")]
+    CratonRamFile,
+
     #[error("Cannot open initramfs file: {0}")]
     InitramfsFile(#[source] io::Error),
 
@@ -937,6 +940,163 @@ impl Vm {
             true,
             timestamp,
         )
+    }
+
+    #[cfg(feature = "craton")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_craton(
+        config: Arc<Mutex<VmConfig>>,
+        exit_evt: EventFd,
+        reset_evt: EventFd,
+        seccomp_action: &SeccompAction,
+        hypervisor: Arc<dyn hypervisor::Hypervisor>,
+        activate_evt: EventFd,
+        serial_pty: Option<PtyPair>,
+        console_pty: Option<PtyPair>,
+        console_resize_pipe: Option<File>,
+    ) -> Result<Self> {
+        let timestamp = Instant::now();
+        let uio_devices_info = devices::legacy::uio::get_uio_devices_info().unwrap();
+        let ram_dev_info: &devices::legacy::uio::UioDeviceInfo =
+            match uio_devices_info.iter().find(|d| d.is_ram) {
+                Some(dev_info) => dev_info,
+                None => {
+                    error!("Couldn't find uio ram device!");
+                    return Err(Error::CratonRamFile);
+                }
+            };
+        let ram_start = ram_dev_info.mappings[0].0;
+        let ram_size = ram_dev_info.mappings[0].1;
+        let ram_offset = ram_dev_info.mappings[0].2;
+
+        /* horrible hack but idk what else to do */
+        arch::set_ram_start(GuestAddress(ram_start));
+        arch::set_fdt_addr(GuestAddress(ram_start));
+        arch::set_kernel_start(GuestAddress(ram_start + arch::layout::FDT_MAX_SIZE as u64));
+
+        /* Nuno: this checks for SignalMsi and OneReg */
+        hypervisor.check_required_extensions().unwrap();
+
+        let vm = hypervisor.create_vm_with_type(0).unwrap(); // type 0 = KVM_X86_LEGACY_VM
+
+        let phys_bits = physical_bits(config.lock().unwrap().cpus.max_phys_bits);
+
+        let memory_manager = MemoryManager::new_craton(
+            vm.clone(),
+            GuestAddress(ram_start),
+            ram_size.try_into().unwrap(),
+            ram_offset * (arch::PAGE_SIZE as u64),
+            &ram_dev_info.dev_path,
+            phys_bits,
+        )
+        .map_err(Error::MemoryManager)?;
+
+        println!("created MemoryManager");
+
+        /* Nuno: rest of this code is from new_from_memory_manager */
+
+        /* Nuno: no iommu please */
+        let force_iommu = false;
+
+        let boot_id_list = config
+            .lock()
+            .unwrap()
+            .validate()
+            .map_err(Error::ConfigValidation)?;
+
+        let device_manager = DeviceManager::new(
+            vm.clone(),
+            config.clone(),
+            memory_manager.clone(),
+            &exit_evt,
+            &reset_evt,
+            seccomp_action.clone(),
+            &activate_evt,
+            force_iommu,
+            false,
+            boot_id_list,
+            timestamp,
+        )
+        .map_err(Error::DeviceManager)?;
+
+        println!("created DeviceManager");
+
+        let memory = memory_manager.lock().unwrap().guest_memory();
+        let mmio_bus = Arc::clone(device_manager.lock().unwrap().mmio_bus());
+        let vm_ops: Arc<dyn VmOps> = Arc::new(VmOpsHandler { memory, mmio_bus });
+
+        let numa_nodes =
+            Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
+
+        let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
+        let cpu_manager = cpu::CpuManager::new(
+            &config.lock().unwrap().cpus.clone(),
+            &device_manager,
+            &memory_manager,
+            vm.clone(),
+            exit_evt_clone,
+            reset_evt,
+            hypervisor.clone(),
+            seccomp_action.clone(),
+            vm_ops,
+            &numa_nodes,
+        )
+        .map_err(Error::CpuManager)?;
+
+        println!("created CpuManager");
+
+        let on_tty = unsafe { libc::isatty(libc::STDIN_FILENO as i32) } != 0;
+        let kernel = config
+            .lock()
+            .unwrap()
+            .kernel
+            .as_ref()
+            .map(|k| File::open(&k.path))
+            .transpose()
+            .map_err(Error::KernelFile)?;
+
+        let initramfs = config
+            .lock()
+            .unwrap()
+            .initramfs
+            .as_ref()
+            .map(|i| File::open(&i.path))
+            .transpose()
+            .map_err(Error::InitramfsFile)?;
+
+        #[cfg(feature = "gdb")]
+        let stop_on_boot = config.lock().unwrap().gdb;
+        #[cfg(not(feature = "gdb"))]
+        let stop_on_boot = false;
+
+        let new_vm = Vm {
+            kernel,
+            initramfs,
+            device_manager,
+            config,
+            on_tty,
+            threads: Vec::with_capacity(1),
+            signals: None,
+            state: RwLock::new(VmState::Created),
+            cpu_manager,
+            memory_manager,
+            vm,
+            numa_nodes,
+            seccomp_action: seccomp_action.clone(),
+            exit_evt,
+            stop_on_boot,
+        };
+
+        // The device manager must create the devices from here as it is part
+        // of the regular code path creating everything from scratch.
+        new_vm
+            .device_manager
+            .lock()
+            .unwrap()
+            .create_devices(serial_pty, console_pty, console_resize_pipe)
+            .map_err(Error::DeviceManager)?;
+
+        Ok(new_vm)
     }
 
     fn load_initramfs(&mut self, guest_mem: &GuestMemoryMmap) -> Result<arch::InitramfsConfig> {
