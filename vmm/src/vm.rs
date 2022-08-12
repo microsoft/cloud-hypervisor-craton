@@ -984,7 +984,7 @@ impl Vm {
         let mut kernel = self.kernel.as_ref().unwrap();
         let entry_addr = match linux_loader::loader::pe::PE::load(
             mem.deref(),
-            Some(arch::layout::KERNEL_START),
+            Some(arch::get_kernel_start()),
             &mut kernel,
             None,
         ) {
