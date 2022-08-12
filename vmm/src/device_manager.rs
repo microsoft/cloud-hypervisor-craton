@@ -54,6 +54,8 @@ use block_util::{
 use devices::gic;
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
+#[cfg(feature = "craton")]
+use devices::legacy::uio;
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::Pl011;
 #[cfg(target_arch = "x86_64")]
@@ -135,7 +137,7 @@ const MMIO_LEN: u64 = 0x1000;
 #[cfg(target_arch = "x86_64")]
 const IOAPIC_DEVICE_NAME: &str = "__ioapic";
 const SERIAL_DEVICE_NAME: &str = "__serial";
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(feature = "craton")))]
 const GPIO_DEVICE_NAME: &str = "__gpio";
 const RNG_DEVICE_NAME: &str = "__rng";
 #[cfg(feature = "pci_support")]
@@ -1016,6 +1018,9 @@ pub struct DeviceManager {
     acpi_platform_addresses: AcpiPlatformAddresses,
     #[cfg(feature = "mmio_support")]
     pending_activations: Arc<Mutex<Vec<VirtioMmioDeviceActivator>>>,
+
+    #[cfg(feature = "craton")]
+    craton_uio_devices: Vec<(EventFd, EventFd, u32)>,
 }
 
 impl DeviceManager {
@@ -1185,6 +1190,8 @@ impl DeviceManager {
             pending_activations: Arc::new(Mutex::new(Vec::default())),
             #[cfg(feature = "acpi")]
             acpi_platform_addresses: AcpiPlatformAddresses::default(),
+            #[cfg(feature = "craton")]
+            craton_uio_devices: Vec::new(),
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
@@ -1222,6 +1229,7 @@ impl DeviceManager {
         serial_pty: Option<PtyPair>,
         console_pty: Option<PtyPair>,
         console_resize_pipe: Option<File>,
+        #[cfg(feature = "craton")] uio_devices_info: Vec<uio::UioDeviceInfo>,
     ) -> DeviceManagerResult<()> {
         let mut virtio_devices: Vec<MetaVirtioDevice> = Vec::new();
 
@@ -1234,6 +1242,10 @@ impl DeviceManager {
         > = Arc::new(LegacyUserspaceInterruptManager::new(Arc::clone(
             &interrupt_controller,
         )));
+
+        #[cfg(feature = "craton")]
+        self.add_craton_uio_devices(uio_devices_info)?;
+
         #[cfg(feature = "acpi")]
         {
             if let Some(acpi_address) = self.memory_manager.lock().unwrap().acpi_address() {
@@ -1255,8 +1267,9 @@ impl DeviceManager {
                 .map_err(DeviceManagerError::EventFd)?,
         )?;
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", not(feature = "craton")))]
         self.add_legacy_devices(&legacy_interrupt_manager)?;
+
         #[cfg(feature = "acpi")]
         {
             self.ged_notification_device = self.add_acpi_devices(
@@ -1705,7 +1718,7 @@ impl DeviceManager {
         Ok(())
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(feature = "craton")))]
     fn add_legacy_devices(
         &mut self,
         interrupt_manager: &Arc<dyn InterruptManager<GroupConfig = LegacyIrqGroupConfig>>,
@@ -1824,6 +1837,144 @@ impl DeviceManager {
         let uefi_flash =
             GuestMemoryAtomic::new(GuestMemoryMmap::from_regions(vec![uefi_region]).unwrap());
         self.uefi_flash = Some(uefi_flash);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "craton")]
+    pub fn enable_craton_uio_devices(&mut self) -> DeviceManagerResult<()> {
+        /* connect eventfd and resample fd to kvm */
+        for (eventfd, resamplefd, irq) in self.craton_uio_devices.iter() {
+            self.address_manager
+                .vm
+                .register_irqfd_with_resample(eventfd, resamplefd, *irq)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed registering irq_fd: {}", e),
+                    )
+                })
+                .unwrap();
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "craton")]
+    fn add_craton_uio_devices(
+        &mut self,
+        uio_devices_info: Vec<uio::UioDeviceInfo>,
+    ) -> DeviceManagerResult<()> {
+        for uio_dev_info in uio_devices_info.iter() {
+            if uio_dev_info.is_ram {
+                continue;
+            }
+            info!("Creating uio device \"{}\"", uio_dev_info.name);
+            // TODO support other devices
+            assert!(uio_dev_info.name.eq("rtc0"));
+
+            /* open the device file for mapping and interrupt fds */
+            let dev_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&uio_dev_info.dev_path)
+                .unwrap();
+            info!("opened {}", uio_dev_info.name);
+
+            /* interrupts */
+            /* TODO allow 0 to n interrupts... */
+
+            /* create eventfd and resamplefd */
+            /* (copying what qemu-craton does) */
+            let eventfd = EventFd::new(libc::EFD_NONBLOCK | libc::EFD_CLOEXEC).unwrap();
+            let resamplefd = EventFd::new(libc::EFD_NONBLOCK | libc::EFD_CLOEXEC).unwrap();
+            info!("Created eventfd and resamplefd");
+
+            /* register eventfd and resample fd with uio driver */
+            use vmm_sys_util::ioctl::ioctl_with_ref;
+            use vmm_sys_util::{ioctl_ioc_nr, ioctl_iow_nr};
+            #[repr(C, packed)]
+            #[derive(Debug, Copy, Clone)]
+            struct uio_azure_sphere_irqfd_set {
+                irq_index: u32,
+                fd: i32,
+                resamplefd: i32,
+            }
+            ioctl_iow_nr!(
+                UIO_AZURE_SPHERE_IRQFD_SET,
+                0xf8,
+                0x1,
+                uio_azure_sphere_irqfd_set
+            );
+            let ioctl_in = uio_azure_sphere_irqfd_set {
+                irq_index: 0,
+                fd: eventfd.as_raw_fd(),
+                resamplefd: resamplefd.as_raw_fd(),
+            };
+            let ret = unsafe { ioctl_with_ref(&dev_file, UIO_AZURE_SPHERE_IRQFD_SET(), &ioctl_in) };
+            if ret != 0 {
+                error!("Failed UIO_AZURE_SPHERE_IRQFD_SET");
+                continue;
+            }
+            info!("Successfully bound eventfd and resamplefd to uio interrupt");
+
+            /* first allocate an interrupt in the guest's interrupt space... */
+            let irq = self
+                .address_manager
+                .allocator
+                .lock()
+                .unwrap()
+                .allocate_irq()
+                .unwrap();
+
+            /* we'll enable it later... because gic isn't initialized yet */
+            self.craton_uio_devices.push((eventfd, resamplefd, irq));
+
+            /* mappings */
+            /* just 1 for now */
+
+            let addr = uio_dev_info.mappings[0].0;
+            let len = uio_dev_info.mappings[0].1;
+            let offset = uio_dev_info.mappings[0].2;
+
+            /* mmap the memory (copied from memory manager new_craton() */
+            let prot = libc::PROT_READ | libc::PROT_WRITE;
+            let flags = libc::MAP_SHARED;
+            use core::ptr::null_mut;
+            let mmap_addr = unsafe {
+                libc::mmap(
+                    null_mut(),
+                    len as usize,
+                    prot,
+                    flags,
+                    dev_file.as_raw_fd(), /* Note: after mapping we can safely close the file */
+                    offset as libc::off_t,
+                )
+            };
+
+            if mmap_addr == libc::MAP_FAILED {
+                error!("uio device mmap failed!");
+                return Err(DeviceManagerError::Mmap(io::Error::last_os_error()));
+            }
+            info!("uio device mmap succeeded! {:?}", mmap_addr);
+
+            /* map into guest */
+            let _slot = self
+                .memory_manager
+                .lock()
+                .unwrap()
+                .create_userspace_mapping(addr, len, mmap_addr as u64, false, false, false)
+                .map_err(DeviceManagerError::MemoryManager)?;
+            /* dont need to update guest_ram_mapping in memory manager... */
+
+            /* TODO need to put it into device tree...? */
+            /* TODO for uio devices, they will be in the ARE device tree.. for now hardcoded this
+             * thing becuase it's the only device, RTC...
+             */
+            self.id_to_dev_info.insert(
+                (DeviceType::Rtc, uio_dev_info.name.clone()),
+                MmioDeviceInfo { addr, len, irq },
+            );
+        }
 
         Ok(())
     }
@@ -4776,8 +4927,14 @@ impl Snapshottable for DeviceManager {
 
         // Now that DeviceManager is updated with the right states, it's time
         // to create the devices based on the configuration.
-        self.create_devices(None, None, None)
-            .map_err(|e| MigratableError::Restore(anyhow!("Could not create devices {:?}", e)))?;
+        self.create_devices(
+            None,
+            None,
+            None,
+            #[cfg(feature = "craton")]
+            vec![],
+        )
+        .map_err(|e| MigratableError::Restore(anyhow!("Could not create devices {:?}", e)))?;
 
         Ok(())
     }
