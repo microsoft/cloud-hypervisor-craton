@@ -20,6 +20,8 @@ use arch::x86_64::{SgxEpcRegion, SgxEpcSection};
 use arch::{layout, RegionType};
 #[cfg(target_arch = "x86_64")]
 use devices::ioapic;
+#[cfg(feature = "craton")]
+use devices::legacy::uio::UioDeviceInfo;
 #[cfg(target_arch = "x86_64")]
 use libc::{MAP_NORESERVE, MAP_POPULATE, MAP_SHARED, PROT_READ, PROT_WRITE};
 use serde::{Deserialize, Serialize};
@@ -192,6 +194,10 @@ pub struct MemoryManager {
 
 #[derive(Debug)]
 pub enum Error {
+    /// Failed to mmap ram uio device.
+    #[cfg(feature = "craton")]
+    CratonMmap(io::Error),
+
     /// Failed to create shared file.
     SharedFileCreate(io::Error),
 
@@ -429,6 +435,7 @@ impl MemoryManager {
     /// - First one mapping entirely the first memory zone on 0-1G range
     /// - Second one mapping partially the second memory zone on 1G-3G range
     /// - Third one mapping partially the second memory zone on 4G-6G range
+    #[cfg(not(feature = "craton"))]
     fn create_memory_regions_from_zones(
         ram_regions: &[(GuestAddress, usize)],
         zones: &[MemoryZoneConfig],
@@ -635,6 +642,7 @@ impl MemoryManager {
         Ok(())
     }
 
+    #[cfg(not(feature = "craton"))]
     fn validate_memory_config(
         config: &MemoryConfig,
         user_provided_zones: bool,
@@ -838,7 +846,14 @@ impl MemoryManager {
         restore_data: Option<&MemoryManagerSnapshotData>,
         existing_memory_files: Option<HashMap<u32, File>>,
         #[cfg(target_arch = "x86_64")] sgx_epc_config: Option<Vec<SgxEpcConfig>>,
+        #[cfg(feature = "craton")] ram_dev_info: Option<&UioDeviceInfo>,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
+        #[cfg(feature = "craton")]
+        let ram_dev_info = ram_dev_info.unwrap();
+
+        #[cfg(feature = "craton")]
+        let user_provided_zones = false;
+        #[cfg(not(feature = "craton"))]
         let user_provided_zones = config.size == 0;
 
         let mmio_address_space_size = mmio_address_space_size(phys_bits);
@@ -850,8 +865,15 @@ impl MemoryManager {
             GuestAddress(mmio_address_space_size - PLATFORM_DEVICE_AREA_SIZE);
         let end_of_device_area = start_of_platform_device_area.unchecked_sub(1);
 
+        #[cfg(not(feature = "craton"))]
         let (ram_size, zones, allow_mem_hotplug) =
             Self::validate_memory_config(config, user_provided_zones)?;
+
+        #[cfg(feature = "craton")]
+        let (ram_size, zones, allow_mem_hotplug) = (ram_dev_info.mappings[0].1, vec![], false);
+
+        #[cfg(feature = "craton")]
+        let ram_start = GuestAddress(ram_dev_info.mappings[0].0);
 
         let (
             start_of_device_area,
@@ -890,8 +912,12 @@ impl MemoryManager {
             )
         } else {
             // Init guest memory
+            #[cfg(not(feature = "craton"))]
             let arch_mem_regions = arch::arch_memory_regions(ram_size);
+            #[cfg(feature = "craton")]
+            let arch_mem_regions = vec![(ram_start, ram_size.try_into().unwrap(), RegionType::Ram)];
 
+            #[cfg(not(feature = "craton"))]
             let ram_regions: Vec<(GuestAddress, usize)> = arch_mem_regions
                 .iter()
                 .filter(|r| r.2 == RegionType::Ram)
@@ -907,8 +933,78 @@ impl MemoryManager {
                 })
                 .collect();
 
+            #[cfg(not(feature = "craton"))]
             let (mem_regions, mut memory_zones) =
                 Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault)?;
+
+            #[cfg(feature = "craton")]
+            let (mem_regions, mut memory_zones) = {
+                let ram_offset = ram_dev_info.mappings[0].2 * (arch::PAGE_SIZE as u64);
+                /* Nuno: We can't use create_ram_region because we need MmapRegion::build_raw
+                 * (The vm-memory crate doesn't support mmaping a device, because the file size of
+                 * the device may be smaller than the mmap region size, so we do the mmap here)
+                 */
+                let ram_file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&ram_dev_info.dev_path)
+                    .unwrap();
+                info!("Opened ram uio file {}", &ram_dev_info.dev_path.display());
+                let prot = libc::PROT_READ | libc::PROT_WRITE;
+                let flags = libc::MAP_SHARED;
+                use core::ptr::null_mut;
+                let mmap_addr = unsafe {
+                    libc::mmap(
+                        null_mut(),
+                        ram_size.try_into().unwrap(),
+                        prot,
+                        flags,
+                        ram_file.as_raw_fd(), /* Note: after mapping we can safely close the file */
+                        ram_offset as libc::off_t,
+                    )
+                };
+
+                if mmap_addr == libc::MAP_FAILED {
+                    error!("mmap failed!");
+                    return Err(Error::CratonMmap(io::Error::last_os_error()));
+                }
+                info!("Ram uio mmap succeeded! {:?}", mmap_addr);
+                /* Nuno: test access to region, just to make sure */
+                unsafe {
+                    let vec: Vec<u8> = vec![1, 2, 3];
+                    std::ptr::copy_nonoverlapping(vec.as_ptr(), mmap_addr as *mut u8, 3);
+                };
+
+                /* Nuno: now put everything into MemoryManager-friendly structures */
+                let mut mem_regions = Vec::new();
+                let mut memory_zones = HashMap::new();
+                // Add zone id to the list of memory zones.
+                let zone_id = String::from(DEFAULT_MEMORY_ZONE);
+                memory_zones.insert(zone_id.clone(), MemoryZone::default());
+
+                // SAFETY: We just mmapped this region and checked the return code
+                let region = unsafe {
+                    MmapRegion::build_raw(
+                        mmap_addr as *mut u8,
+                        ram_size.try_into().unwrap(),
+                        prot,
+                        flags,
+                    )
+                }
+                .unwrap();
+                let region = Arc::new(GuestRegionMmap::new(region, ram_start).unwrap());
+                info!("Created GuestRegionMmap");
+                info!(" pointer: {:#x}", region.as_ptr() as u64);
+                info!(" guest addr: {:#x}", region.start_addr().raw_value());
+                info!(" size: {:#x}", region.len() as u64);
+
+                if let Some(memory_zone) = memory_zones.get_mut(&zone_id) {
+                    memory_zone.regions.push(region.clone());
+                }
+                mem_regions.push(region);
+
+                (mem_regions, memory_zones)
+            };
 
             let mut guest_memory =
                 GuestMemoryMmap::from_arc_regions(mem_regions).map_err(Error::GuestMemory)?;
@@ -1028,10 +1124,12 @@ impl MemoryManager {
             .ok_or(Error::CreateSystemAllocator)?,
         ));
 
-        #[cfg(not(feature = "tdx"))]
+        #[cfg(not(any(feature = "tdx", feature = "craton")))]
         let dynamic = true;
         #[cfg(feature = "tdx")]
         let dynamic = !tdx_enabled;
+        #[cfg(feature = "craton")]
+        let dynamic = false;
 
         #[cfg(feature = "acpi")]
         let acpi_address = if dynamic
@@ -1123,6 +1221,8 @@ impl MemoryManager {
                 Some(&mem_snapshot),
                 None,
                 #[cfg(target_arch = "x86_64")]
+                None,
+                #[cfg(feature = "craton")]
                 None,
             )?;
 

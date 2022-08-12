@@ -123,6 +123,9 @@ pub enum Error {
     #[error("Cannot open the device tree file: {0}")]
     DtbFile(io::Error),
 
+    #[error("Cannot find a uio ram device")]
+    CratonRamFile,
+
     #[error("Cannot open initramfs file: {0}")]
     InitramfsFile(#[source] io::Error),
 
@@ -783,6 +786,28 @@ impl Vm {
         #[cfg(target_arch = "x86_64")]
         let sgx_epc_config = config.lock().unwrap().sgx_epc.clone();
 
+        #[cfg(feature = "craton")]
+        let uio_devices_info = devices::legacy::uio::get_uio_devices_info().unwrap();
+
+        #[cfg(feature = "craton")]
+        let ram_dev_info: &devices::legacy::uio::UioDeviceInfo =
+            match uio_devices_info.iter().find(|d| d.is_ram) {
+                Some(dev_info) => dev_info,
+                None => {
+                    return Err(Error::CratonRamFile);
+                }
+            };
+
+        #[cfg(feature = "craton")]
+        {
+            let ram_start = ram_dev_info.mappings[0].0;
+
+            /* horrible hack but idk what else to do */
+            arch::set_ram_start(GuestAddress(ram_start));
+            arch::set_fdt_addr(GuestAddress(ram_start));
+            arch::set_kernel_start(GuestAddress(ram_start + arch::layout::FDT_MAX_SIZE as u64));
+        }
+
         let memory_manager = MemoryManager::new(
             vm.clone(),
             &config.lock().unwrap().memory.clone(),
@@ -794,6 +819,8 @@ impl Vm {
             None,
             #[cfg(target_arch = "x86_64")]
             sgx_epc_config,
+            #[cfg(feature = "craton")]
+            Some(ram_dev_info),
         )
         .map_err(Error::MemoryManager)?;
 
@@ -921,6 +948,8 @@ impl Vm {
             Some(memory_manager_data),
             existing_memory_files,
             #[cfg(target_arch = "x86_64")]
+            None,
+            #[cfg(feature = "craton")]
             None,
         )
         .map_err(Error::MemoryManager)?;
