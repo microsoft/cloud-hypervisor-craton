@@ -1005,6 +1005,7 @@ impl Vm {
             .map_err(Error::ConfigValidation)?;
 
         let device_manager = DeviceManager::new(
+            hypervisor.hypervisor_type(),
             vm.clone(),
             config.clone(),
             memory_manager.clone(),
@@ -1084,6 +1085,7 @@ impl Vm {
             numa_nodes,
             seccomp_action: seccomp_action.clone(),
             exit_evt,
+            hypervisor,
             stop_on_boot,
         };
 
@@ -1093,7 +1095,12 @@ impl Vm {
             .device_manager
             .lock()
             .unwrap()
-            .create_devices(serial_pty, console_pty, console_resize_pipe)
+            .create_devices_craton(
+                serial_pty,
+                console_pty,
+                console_resize_pipe,
+                uio_devices_info,
+            )
             .map_err(Error::DeviceManager)?;
 
         Ok(new_vm)
@@ -1510,6 +1517,13 @@ impl Vm {
             .unwrap()
             .enable()
             .map_err(Error::EnableInterruptController)?;
+
+        #[cfg(feature = "craton")]
+        self.device_manager
+            .lock()
+            .unwrap()
+            .enable_craton_uio_devices()
+            .unwrap();
 
         Ok(())
     }
