@@ -80,6 +80,12 @@ pub fn configure_vcpu(
 
 pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, RegionType)> {
     let mut regions = vec![
+        (
+            GuestAddress(0),
+            layout::MEM_32BIT_DEVICES_START.0 as usize,
+            RegionType::Reserved,
+        ),
+        /*
         #[cfg(feature = "acpi")]
         (GuestAddress(0), layout::UEFI_SIZE as usize, RegionType::Ram),
         #[cfg(not(feature = "acpi"))]
@@ -88,6 +94,11 @@ pub fn arch_memory_regions(size: GuestUsize) -> Vec<(GuestAddress, usize, Region
             layout::UEFI_SIZE as usize,
             RegionType::Reserved,
         ),
+        (
+            GuestAddress(layout::UEFI_SIZE),
+            (layout::MEM_32BIT_DEVICES_START.0 - layout::UEFI_SIZE) as usize,
+            RegionType::Reserved,
+        ),*/
         // 256 MiB ~ 768 MiB: MMIO space
         (
             layout::MEM_32BIT_DEVICES_START,

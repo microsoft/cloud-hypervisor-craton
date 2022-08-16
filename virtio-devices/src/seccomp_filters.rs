@@ -102,6 +102,8 @@ fn virtio_block_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
 
 fn virtio_console_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
+        (libc::SYS_prctl, vec![]),
+        (libc::SYS_getcwd, vec![]),
         (libc::SYS_ioctl, create_virtio_console_ioctl_seccomp_rule()),
         (libc::SYS_mprotect, vec![]),
         (libc::SYS_prctl, vec![]),
