@@ -492,7 +492,7 @@ impl BusDevice for VirtioMmioDevice {
         }
 
         // Try and activate the device if the driver status has changed
-        if self.needs_activation() {
+        if offset == 0x70 && self.needs_activation() {
             let barrier = Arc::new(Barrier::new(2));
             let activator = self.prepare_activator(Some(barrier.clone()));
             self.pending_activations.lock().unwrap().push(activator);
