@@ -90,6 +90,8 @@ use arch::aarch64::gic::gicv3_its::kvm::{KvmGicV3Its, GIC_V3_ITS_SNAPSHOT_ID};
 #[cfg(target_arch = "aarch64")]
 use arch::aarch64::gic::kvm::create_gic;
 #[cfg(target_arch = "aarch64")]
+use arch::aarch64::gic::kvm::create_gic_its;
+#[cfg(target_arch = "aarch64")]
 use devices::interrupt_controller::{self, InterruptController};
 
 /// Errors associated with VM management
@@ -770,6 +772,17 @@ impl Vm {
                         console_resize_pipe);
             }
         }
+        /* hacky hack */
+        #[cfg(all(feature = "kvm", target_arch = "aarch64"))]
+        {
+            use arch::aarch64::*;
+            set_gic_redists_size(
+                config.lock().unwrap().cpus.boot_vcpus as u64 * layout::GIC_V3_REDIST_SIZE,
+            );
+            set_gic_redists_addr(get_gic_dist_addr() - get_gic_redists_size());
+            set_gic_its_addr(get_gic_redists_addr() - layout::GIC_V3_ITS_SIZE);
+        }
+
         #[cfg(feature = "tdx")]
         let tdx_enabled = config.lock().unwrap().tdx.is_some();
         hypervisor.check_required_extensions().unwrap();
@@ -979,6 +992,10 @@ impl Vm {
         arch::set_ram_start(ram_start);
         arch::set_fdt_addr(ram_start);
         arch::set_kernel_start(ram_start + arch::layout::FDT_MAX_SIZE as u64);
+        /* TODO get these from dtb */
+        arch::aarch64::set_gic_dist_addr(0x800_0000);
+        arch::aarch64::set_gic_redists_addr(0x80a_0000);
+        arch::aarch64::set_gic_redists_size(0xf6_0000);
 
         /* Nuno: this checks for SignalMsi and OneReg */
         hypervisor.check_required_extensions().unwrap();
@@ -1087,13 +1104,25 @@ impl Vm {
             exit_evt,
         };
 
+        // TODO get these from device tree
+        // tuple of (address, irq)
+        let virtio_mmio_slots: Vec<(u64, u32)> = vec![
+            (0x4100_0000, 0x64),
+            (0x4100_0200, 0x65),
+            (0x4100_0400, 0x66),
+            (0x4100_0600, 0x67),
+            (0x4100_0800, 0x68),
+            (0x4100_0a00, 0x69),
+            (0x4100_0c00, 0x6a),
+            (0x4100_0e00, 0x6b),
+        ];
         // The device manager must create the devices from here as it is part
         // of the regular code path creating everything from scratch.
         new_vm
             .device_manager
             .lock()
             .unwrap()
-            .create_devices_craton(serial_pty, console_pty, console_resize_pipe, uio_devices_info)
+            .create_devices_craton(serial_pty, console_pty, console_resize_pipe, uio_devices_info, virtio_mmio_slots)
             .map_err(Error::DeviceManager)?;
 
         Ok(new_vm)
@@ -1288,6 +1317,7 @@ impl Vm {
             Some(_) => Some(self.load_initramfs(&mem)?),
             None => None,
         };
+        let craton_enabled = self.config.lock().unwrap().craton;
 
         let device_info = &self
             .device_manager
@@ -1332,10 +1362,17 @@ impl Vm {
             None
         };
 
-        let gic_device = create_gic(
-            &self.memory_manager.lock().as_ref().unwrap().vm,
-            self.cpu_manager.lock().unwrap().boot_vcpus() as u64,
-        )
+        let gic_device = if craton_enabled {
+            create_gic(
+                &self.memory_manager.lock().as_ref().unwrap().vm,
+                self.cpu_manager.lock().unwrap().boot_vcpus() as u64,
+            )
+        } else {
+            create_gic_its(
+                &self.memory_manager.lock().as_ref().unwrap().vm,
+                self.cpu_manager.lock().unwrap().boot_vcpus() as u64,
+            )
+        }
         .map_err(|e| {
             Error::ConfigureSystem(arch::Error::AArch64Setup(arch::aarch64::Error::SetupGic(e)))
         })?;
@@ -1386,7 +1423,6 @@ impl Vm {
             .enable()
             .map_err(Error::EnableInterruptController)?;
 
-        let craton_enabled = self.config.lock().unwrap().craton;
         if craton_enabled {
             self.device_manager
                 .lock()
@@ -2408,12 +2444,17 @@ impl Vm {
         let saved_vcpu_states = self.cpu_manager.lock().unwrap().get_saved_states();
         // The number of vCPUs is the same as the number of saved vCPU states.
         let vcpu_numbers = saved_vcpu_states.len();
+        let craton_enabled = self.config.lock().unwrap().craton;
 
         // Creating a GIC device here, as the GIC will not be created when
         // restoring the device manager. Note that currently only the bare GICv3
         // without ITS is supported.
-        let mut gic_device = create_gic(&self.vm, vcpu_numbers.try_into().unwrap())
-            .map_err(|e| MigratableError::Restore(anyhow!("Could not create GIC: {:#?}", e)))?;
+        let mut gic_device = if craton_enabled {
+            create_gic(&self.vm, vcpu_numbers.try_into().unwrap())
+        } else {
+            create_gic_its(&self.vm, vcpu_numbers.try_into().unwrap())
+        }
+        .map_err(|e| MigratableError::Restore(anyhow!("Could not create GIC: {:#?}", e)))?;
 
         // Here we prepare the GICR_TYPER registers from the restored vCPU states.
         gic_device.set_gicr_typers(&saved_vcpu_states);

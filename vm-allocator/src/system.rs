@@ -144,6 +144,28 @@ impl SystemAllocator {
         )
     }
 
+    /// Reserves a section of `size` bytes of platform MMIO or MMIO hole address space.
+    pub fn allocate_platform_or_mmio_hole_addresses(
+        &mut self,
+        address: Option<GuestAddress>,
+        size: GuestUsize,
+        align_size: Option<GuestUsize>,
+    ) -> Option<GuestAddress> {
+        let mmio_hole = self.mmio_hole_address_space.allocate(
+            address,
+            size,
+            Some(align_size.unwrap_or(pagesize() as u64)),
+        );
+        if mmio_hole.is_some() {
+            return mmio_hole;
+        }
+        self.platform_mmio_address_space.allocate(
+            address,
+            size,
+            Some(align_size.unwrap_or(pagesize() as u64)),
+        )
+    }
+
     #[cfg(target_arch = "x86_64")]
     /// Free an IO address range.
     /// We can only free a range if it matches exactly an already allocated range.
