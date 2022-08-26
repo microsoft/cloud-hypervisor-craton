@@ -118,8 +118,13 @@ pub enum Error {
     #[error("Cannot open kernel file: {0}")]
     KernelFile(#[source] io::Error),
 
+    #[cfg(target_arch = "aarch64")]
     #[error("Cannot open the device tree file: {0}")]
     DtbFile(io::Error),
+
+    #[cfg(target_arch = "aarch64")]
+    #[error("Cannot parse the device tree file: {0}")]
+    ParseFdt(io::Error),
 
     #[error("Cannot find a uio ram device")]
     CratonRamFile,
@@ -505,6 +510,8 @@ pub struct Vm {
     stop_on_boot: bool,
     #[cfg(target_arch = "x86_64")]
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    #[cfg(target_arch = "aarch64")]
+    dtb_data: Option<Vec<u8>>,
 }
 
 impl Vm {
@@ -523,6 +530,7 @@ impl Vm {
         activate_evt: EventFd,
         restoring: bool,
         timestamp: Instant,
+        #[cfg(target_arch = "aarch64")] dtb_data: Option<Vec<u8>>,
     ) -> Result<Self> {
         let boot_id_list = config
             .lock()
@@ -658,6 +666,8 @@ impl Vm {
             stop_on_boot,
             #[cfg(target_arch = "x86_64")]
             load_payload_handle,
+            #[cfg(target_arch = "aarch64")]
+            dtb_data,
         })
     }
 
@@ -755,6 +765,21 @@ impl Vm {
         console_pty: Option<PtyPair>,
         console_resize_pipe: Option<File>,
     ) -> Result<Self> {
+        #[cfg(target_arch = "aarch64")]
+        let dtb_file = config
+            .lock()
+            .unwrap()
+            .dtb
+            .as_ref()
+            .map(|k| File::open(&k.path))
+            .transpose()
+            .map_err(Error::DtbFile)?;
+        #[cfg(target_arch = "aarch64")]
+        let dtb_data = dtb_file
+            .map(|mut f| arch::aarch64::fdt::fdt_file_to_vec(&mut f))
+            .transpose()
+            .map_err(Error::ParseFdt)?;
+
         let timestamp = Instant::now();
 
         #[cfg(feature = "tdx")]
@@ -835,6 +860,8 @@ impl Vm {
             activate_evt,
             false,
             timestamp,
+            #[cfg(target_arch = "aarch64")]
+            dtb_data,
         )?;
 
         // The device manager must create the devices from here as it is part
@@ -912,6 +939,8 @@ impl Vm {
             activate_evt,
             true,
             timestamp,
+            #[cfg(target_arch = "aarch64")]
+            None,
         )
     }
 
@@ -971,6 +1000,8 @@ impl Vm {
             activate_evt,
             true,
             timestamp,
+            #[cfg(target_arch = "aarch64")]
+            None,
         )
     }
 
@@ -1349,16 +1380,6 @@ impl Vm {
                 ))
             })?;
 
-        let dtb_path = self
-            .config
-            .lock()
-            .unwrap()
-            .dtb
-            .as_ref()
-            .map(|k| File::open(&k.path))
-            .transpose()
-            .map_err(Error::DtbFile)?;
-
         arch::configure_system(
             &mem,
             cmdline.as_str(),
@@ -1371,7 +1392,7 @@ impl Vm {
             &vgic,
             &self.numa_nodes,
             pmu_supported,
-            dtb_path,
+            self.dtb_data.as_ref(),
         )
         .map_err(Error::ConfigureSystem)?;
 

@@ -18,7 +18,6 @@ use log::{log_enabled, Level};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
-use std::fs::File;
 use std::sync::{Arc, Mutex};
 use vm_memory::{Address, GuestAddress, GuestMemory, GuestUsize};
 
@@ -151,12 +150,14 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
     gic_device: &Arc<Mutex<dyn Vgic>>,
     numa_nodes: &NumaNodes,
     pmu_supported: bool,
-    dtb_path: Option<File>,
+    dtb: Option<&Vec<u8>>,
 ) -> super::Result<()> {
-    let fdt_final = if let Some(mut dtb_file) = dtb_path {
-        fdt::fdt_file_to_vec(&mut dtb_file).map_err(|_| Error::SetupFdt)?
+    let fdt_final: &Vec<u8>;
+    let mut _fdt_vec = vec![];
+    if let Some(fdt) = dtb {
+        fdt_final = fdt
     } else {
-        fdt::create_fdt(
+        _fdt_vec = fdt::create_fdt(
             guest_mem,
             cmdline,
             vcpu_mpidr,
@@ -169,13 +170,13 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: ::std::hash::Bui
             virtio_iommu_bdf,
             pmu_supported,
         )
-        .map_err(|_| Error::SetupFdt)?
-    };
-
-    if log_enabled!(Level::Debug) {
-        fdt::print_fdt(&fdt_final);
+        .map_err(|_| Error::SetupFdt)?;
+        fdt_final = &_fdt_vec;
     }
 
+    if log_enabled!(Level::Debug) {
+        fdt::print_fdt(fdt_final);
+    }
     fdt::write_fdt_to_memory(fdt_final, guest_mem).map_err(Error::WriteFdtToMemory)?;
 
     Ok(())

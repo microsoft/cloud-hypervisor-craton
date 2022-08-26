@@ -150,7 +150,7 @@ pub fn fdt_file_to_vec(file: &mut File) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-pub fn write_fdt_to_memory(fdt_final: Vec<u8>, guest_mem: &GuestMemoryMmap) -> Result<()> {
+pub fn write_fdt_to_memory(fdt_final: &Vec<u8>, guest_mem: &GuestMemoryMmap) -> Result<()> {
     // Write FDT to memory.
     guest_mem
         .write_slice(fdt_final.as_slice(), super::get_fdt_addr())
