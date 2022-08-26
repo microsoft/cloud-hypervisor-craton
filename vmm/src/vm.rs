@@ -42,6 +42,8 @@ use crate::{
 };
 use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
+#[cfg(feature = "craton")]
+use arch::layout;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
 #[cfg(feature = "tdx")]
@@ -59,6 +61,8 @@ use devices::interrupt_controller::{self, InterruptController};
 use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
+#[cfg(feature = "craton")]
+use hypervisor::arch::aarch64::gic::VgicConfig;
 use hypervisor::{HypervisorVmError, VmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(feature = "guest_debug")]
@@ -1351,6 +1355,30 @@ impl Vm {
         };
 
         let vcpu_count = self.cpu_manager.lock().unwrap().boot_vcpus() as u64;
+
+        #[cfg(not(feature = "craton"))]
+        let vgic_config = create_vgic_config(vcpu_count);
+
+        #[cfg(feature = "craton")]
+        let vgic_config = {
+            let (dist_addr, dist_size, redists_addr, redists_size) =
+                arch::aarch64::fdt::get_gic_dist_redist_from_dtb(self.dtb_data.as_ref().unwrap());
+            VgicConfig {
+                vcpu_count,
+                dist_addr,
+                dist_size,
+                redists_addr,
+                redists_size,
+                msi_addr: dist_addr - layout::GIC_V3_ITS_SIZE,
+                msi_size: layout::GIC_V3_ITS_SIZE,
+                nr_irqs: layout::IRQ_NUM,
+            }
+        };
+        #[cfg(feature = "craton")]
+        {
+            info!("GIC parsed from dtb:");
+            info!("{:#08x?}", vgic_config);
+        }
         let vgic = self
             .device_manager
             .lock()
@@ -1361,7 +1389,7 @@ impl Vm {
             .unwrap()
             .create_vgic(
                 &self.memory_manager.lock().as_ref().unwrap().vm,
-                create_vgic_config(vcpu_count),
+                vgic_config,
             )
             .map_err(|_| {
                 Error::ConfigureSystem(arch::Error::PlatformSpecific(
