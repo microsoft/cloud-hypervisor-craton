@@ -841,7 +841,7 @@ fn print_node(node: fdt_parser::node::FdtNode<'_, '_>, n_spaces: usize) {
 
 pub fn get_gic_dist_redist_from_dtb(dtb: &[u8]) -> (u64, u64, u64, u64) {
     let fdt = fdt_parser::Fdt::new(dtb).unwrap();
-    let node = fdt.find_node("/interrupt-controller").unwrap();
+    let node = fdt.find_compatible(&["arm,gic-v3"]).unwrap();
     let mut reg_it = node.reg().unwrap();
     let dist = reg_it.next().unwrap();
     let redist = reg_it.next().unwrap();
@@ -852,3 +852,4 @@ pub fn get_gic_dist_redist_from_dtb(dtb: &[u8]) -> (u64, u64, u64, u64) {
         redist.size.unwrap() as u64,
     )
 }
+
