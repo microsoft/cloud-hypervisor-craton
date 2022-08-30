@@ -42,6 +42,8 @@ use crate::{
 };
 use anyhow::anyhow;
 use arch::get_host_cpu_phys_bits;
+#[cfg(feature = "craton")]
+use arch::layout;
 #[cfg(target_arch = "x86_64")]
 use arch::layout::{KVM_IDENTITY_MAP_START, KVM_TSS_START};
 #[cfg(feature = "tdx")]
@@ -59,6 +61,8 @@ use devices::interrupt_controller::{self, InterruptController};
 use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
+#[cfg(feature = "craton")]
+use hypervisor::arch::aarch64::gic::VgicConfig;
 use hypervisor::{HypervisorVmError, VmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(feature = "guest_debug")]
@@ -118,9 +122,15 @@ pub enum Error {
     #[error("Cannot open kernel file: {0}")]
     KernelFile(#[source] io::Error),
 
+    #[cfg(target_arch = "aarch64")]
     #[error("Cannot open the device tree file: {0}")]
     DtbFile(io::Error),
 
+    #[cfg(feature = "craton")]
+    #[error("Cannot open the host device tree: {0}")]
+    HostDtbFile(io::Error),
+
+    #[cfg(feature = "craton")]
     #[error("Cannot find a uio ram device")]
     CratonRamFile,
 
@@ -505,6 +515,8 @@ pub struct Vm {
     stop_on_boot: bool,
     #[cfg(target_arch = "x86_64")]
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    #[cfg(feature = "craton")]
+    host_dtb: Option<File>,
 }
 
 impl Vm {
@@ -523,6 +535,7 @@ impl Vm {
         activate_evt: EventFd,
         restoring: bool,
         timestamp: Instant,
+        #[cfg(feature = "craton")] host_dtb: Option<File>,
     ) -> Result<Self> {
         let boot_id_list = config
             .lock()
@@ -658,6 +671,8 @@ impl Vm {
             stop_on_boot,
             #[cfg(target_arch = "x86_64")]
             load_payload_handle,
+            #[cfg(feature = "craton")]
+            host_dtb,
         })
     }
 
@@ -755,6 +770,9 @@ impl Vm {
         console_pty: Option<PtyPair>,
         console_resize_pipe: Option<File>,
     ) -> Result<Self> {
+        #[cfg(feature = "craton")]
+        let host_dtb = File::open("/sys/firmware/fdt").map_err(Error::HostDtbFile)?;
+
         let timestamp = Instant::now();
 
         #[cfg(feature = "tdx")]
@@ -835,6 +853,8 @@ impl Vm {
             activate_evt,
             false,
             timestamp,
+            #[cfg(feature = "craton")]
+            Some(host_dtb),
         )?;
 
         // The device manager must create the devices from here as it is part
@@ -912,6 +932,8 @@ impl Vm {
             activate_evt,
             true,
             timestamp,
+            #[cfg(feature = "craton")]
+            None,
         )
     }
 
@@ -971,6 +993,8 @@ impl Vm {
             activate_evt,
             true,
             timestamp,
+            #[cfg(feature = "craton")]
+            None,
         )
     }
 
@@ -1320,6 +1344,30 @@ impl Vm {
         };
 
         let vcpu_count = self.cpu_manager.lock().unwrap().boot_vcpus() as u64;
+
+        #[cfg(not(feature = "craton"))]
+        let vgic_config = Gic::create_default_config(vcpu_count);
+
+        #[cfg(feature = "craton")]
+        let vgic_config = {
+            let (dist_addr, dist_size, redists_addr, redists_size) =
+                arch::aarch64::fdt::get_gic_dist_redist(self.host_dtb.as_mut().unwrap());
+            VgicConfig {
+                vcpu_count,
+                dist_addr,
+                dist_size,
+                redists_addr,
+                redists_size,
+                msi_addr: dist_addr - layout::GIC_V3_ITS_SIZE,
+                msi_size: layout::GIC_V3_ITS_SIZE,
+                nr_irqs: layout::IRQ_NUM,
+            }
+        };
+        #[cfg(feature = "craton")]
+        {
+            info!("GIC parsed from dtb:");
+            info!("{:#08x?}", vgic_config);
+        }
         let vgic = self
             .device_manager
             .lock()
@@ -1330,7 +1378,7 @@ impl Vm {
             .unwrap()
             .create_vgic(
                 &self.memory_manager.lock().as_ref().unwrap().vm,
-                Gic::create_default_config(vcpu_count),
+                vgic_config,
             )
             .map_err(|_| {
                 Error::ConfigureSystem(arch::Error::PlatformSpecific(
@@ -1350,7 +1398,7 @@ impl Vm {
                 ))
             })?;
 
-        let dtb_path = self
+        let dtb = self
             .config
             .lock()
             .unwrap()
@@ -1372,7 +1420,7 @@ impl Vm {
             &vgic,
             &self.numa_nodes,
             pmu_supported,
-            dtb_path,
+            dtb,
         )
         .map_err(Error::ConfigureSystem)?;
 

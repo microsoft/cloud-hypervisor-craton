@@ -838,3 +838,18 @@ fn print_node(node: fdt_parser::node::FdtNode<'_, '_>, n_spaces: usize) {
         print_node(child, n_spaces + 2);
     }
 }
+
+pub fn get_gic_dist_redist(dtb: &mut File) -> (u64, u64, u64, u64) {
+    let blob = fdt_file_to_vec(dtb).unwrap();
+    let fdt = fdt_parser::Fdt::new(&blob).unwrap();
+    let node = fdt.find_compatible(&["arm,gic-v3"]).unwrap();
+    let mut reg_it = node.reg().unwrap();
+    let dist = reg_it.next().unwrap();
+    let redist = reg_it.next().unwrap();
+    (
+        dist.starting_address as u64,
+        dist.size.unwrap() as u64,
+        redist.starting_address as u64,
+        redist.size.unwrap() as u64,
+    )
+}
