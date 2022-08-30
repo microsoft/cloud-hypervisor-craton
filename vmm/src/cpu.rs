@@ -33,6 +33,8 @@ use anyhow::anyhow;
 use arch::EntryPoint;
 #[cfg(any(target_arch = "aarch64", feature = "acpi"))]
 use arch::NumaNodes;
+#[cfg(all(target_arch = "aarch64", feature = "acpi"))]
+use devices::gic::Gic;
 use devices::interrupt_controller::InterruptController;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::{X86SegmentRegs, X86_64CoreRegs};
@@ -1287,7 +1289,6 @@ impl CpuManager {
 
         #[cfg(target_arch = "aarch64")]
         {
-            use vm_memory::Address;
             /* Notes:
              * Ignore Local Interrupt Controller Address at byte offset 36 of MADT table.
              */
@@ -1328,6 +1329,7 @@ impl CpuManager {
 
                 madt.append(gicc);
             }
+            let vgic_config = Gic::create_default_config(self.config.boot_vcpus.into());
 
             // GIC Distributor structure. See section 5.2.12.15 in ACPI spec.
             let gicd = GicD {
@@ -1335,7 +1337,7 @@ impl CpuManager {
                 length: 24,
                 reserved0: 0,
                 gic_id: 0,
-                base_address: arch::layout::MAPPED_IO_START.raw_value() - 0x0001_0000,
+                base_address: vgic_config.dist_addr,
                 global_irq_base: 0,
                 version: 3,
                 reserved1: [0; 3],
@@ -1343,15 +1345,12 @@ impl CpuManager {
             madt.append(gicd);
 
             // See 5.2.12.17 GIC Redistributor (GICR) Structure in ACPI spec.
-            let gicr_size: u32 = 0x0001_0000 * 2 * (self.config.boot_vcpus as u32);
-            let gicr_base: u64 =
-                arch::layout::MAPPED_IO_START.raw_value() - 0x0001_0000 - gicr_size as u64;
             let gicr = GicR {
                 r#type: acpi::ACPI_APIC_GENERIC_REDISTRIBUTOR,
                 length: 16,
                 reserved: 0,
-                base_address: gicr_base,
-                range_length: gicr_size,
+                base_address: vgic_config.redists_addr,
+                range_length: vgic_config.redists_size as u32,
             };
             madt.append(gicr);
 
@@ -1361,7 +1360,7 @@ impl CpuManager {
                 length: 20,
                 reserved0: 0,
                 translation_id: 0,
-                base_address: gicr_base - 2 * 0x0001_0000,
+                base_address: vgic_config.msi_addr,
                 reserved1: 0,
             };
             madt.append(gicits);
