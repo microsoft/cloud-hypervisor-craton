@@ -1352,16 +1352,16 @@ impl Vm {
 
         #[cfg(feature = "craton")]
         let vgic_config = {
-            let (dist_addr, dist_size, redists_addr, redists_size) =
-                arch::aarch64::fdt::get_gic_dist_redist(self.host_dtb.as_mut().unwrap());
+            let (dist_addr, dist_size, redists_addr, redists_size, its_addr, its_size) =
+                arch::aarch64::fdt::get_gic_regs_from_dtb(self.host_dtb.as_mut().unwrap());
             VgicConfig {
                 vcpu_count,
                 dist_addr,
                 dist_size,
                 redists_addr,
                 redists_size,
-                msi_addr: dist_addr - layout::GIC_V3_ITS_SIZE,
-                msi_size: layout::GIC_V3_ITS_SIZE,
+                msi_addr: its_addr,
+                msi_size: its_size,
                 nr_irqs: layout::IRQ_NUM,
             }
         };
