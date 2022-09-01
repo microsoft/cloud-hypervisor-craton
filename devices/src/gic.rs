@@ -24,7 +24,7 @@ type Result<T> = result::Result<T, Error>;
 
 // Reserve 32 IRQs for legacy devices.
 pub const IRQ_LEGACY_BASE: usize = layout::IRQ_BASE as usize;
-pub const IRQ_LEGACY_COUNT: usize = 32;
+pub const IRQ_LEGACY_COUNT: usize = 256;
 
 // Gic (Generic Interupt Controller) struct provides all the functionality of a
 // GIC device. It wraps a hypervisor-emulated GIC device (Vgic) provided by the

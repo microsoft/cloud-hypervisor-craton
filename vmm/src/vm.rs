@@ -871,6 +871,8 @@ impl Vm {
                 console_resize_pipe,
                 #[cfg(feature = "craton")]
                 uio_devices_info,
+                #[cfg(feature = "craton")]
+                arch::aarch64::fdt::find_mmio_address_size_tuples(host_dtb),
             )
             .map_err(Error::DeviceManager)?;
         Ok(new_vm)

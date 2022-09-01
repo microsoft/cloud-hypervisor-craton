@@ -362,6 +362,9 @@ pub enum DeviceManagerError {
     /// Missing PCI device.
     MissingPciDevice,
 
+    /// Not enough virtio slots to satisfy the devices
+    VirtioMmioSlotsNotEnough,
+
     /// Failed to remove a PCI device from the PCI bus.
     RemoveDeviceFromPciBus(pci::PciRootError),
 
@@ -1230,6 +1233,7 @@ impl DeviceManager {
         console_pty: Option<PtyPair>,
         console_resize_pipe: Option<File>,
         #[cfg(feature = "craton")] uio_devices_info: Vec<uio::UioDeviceInfo>,
+        #[cfg(feature = "craton")] virtio_mmio_slots: Vec<(u64, u32)>, //tuple of (address, irq)
     ) -> DeviceManagerResult<()> {
         let mut virtio_devices: Vec<MetaVirtioDevice> = Vec::new();
 
@@ -1297,7 +1301,38 @@ impl DeviceManager {
         self.add_pci_devices(virtio_devices.clone())?;
 
         #[cfg(feature = "mmio_support")]
-        self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
+        {
+            #[cfg(not(feature = "craton"))]
+            {
+                self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
+            }
+            #[cfg(feature = "craton")]
+            {
+                if virtio_devices.len() > virtio_mmio_slots.len() {
+                    return Err(DeviceManagerError::VirtioMmioSlotsNotEnough);
+                }
+                for (dev, (mmio_base, irq_num)) in
+                    virtio_devices.iter().zip(virtio_mmio_slots.iter())
+                {
+                    /* Nuno/Muminul: copied code from add_virtio_mmio_device */
+                    let id = &dev.id;
+                    let id = format!("{}-{}", VIRTIO_MMIO_DEVICE_NAME_PREFIX, id);
+                    let mut node = device_node!(id);
+                    node.children = vec![id.clone()];
+                    node.resources.push(Resource::MmioAddressRange {
+                        base: *mmio_base,
+                        size: 0x200,
+                    });
+                    /* Nuno/Muminul: add IRQ_BASE, because what goes in the device tree is irq - IRQ_BASE...
+                     * TODO: really we should add it in add_virtio_mmio_device but its here for now
+                     */
+                    node.resources
+                        .push(Resource::LegacyIrq(*irq_num + arch::IRQ_BASE));
+                    self.device_tree.lock().unwrap().insert(id, node);
+                }
+                self.add_mmio_devices(virtio_devices.clone(), &legacy_interrupt_manager)?;
+            }
+        }
 
         self.legacy_interrupt_manager = Some(legacy_interrupt_manager);
 
@@ -3859,6 +3894,7 @@ impl DeviceManager {
         }
 
         let (mmio_base, mmio_size) = if let Some((base, size)) = mmio_range {
+            #[cfg(not(feature = "craton"))]
             self.address_manager
                 .allocator
                 .lock()
@@ -3937,7 +3973,7 @@ impl DeviceManager {
             .push(Arc::clone(&mmio_device_arc) as Arc<Mutex<dyn BusDevice>>);
         self.address_manager
             .mmio_bus
-            .insert(mmio_device_arc.clone(), mmio_base, MMIO_LEN)
+            .insert(mmio_device_arc.clone(), mmio_base, mmio_size)
             .map_err(DeviceManagerError::BusError)?;
 
         #[cfg(target_arch = "x86_64")]
@@ -4932,6 +4968,8 @@ impl Snapshottable for DeviceManager {
             None,
             None,
             None,
+            #[cfg(feature = "craton")]
+            vec![],
             #[cfg(feature = "craton")]
             vec![],
         )
