@@ -844,6 +844,7 @@ pub fn get_gic_regs_from_dtb(dtb: &'static str) -> (u64, u64, u64, u64, u64, u64
     let blob = fdt_file_to_vec(&mut dtb_file).unwrap();
     let fdt = fdt_parser::Fdt::new(&blob).unwrap();
     let node = fdt.find_compatible(&["arm,gic-v3"]).unwrap();
+
     let mut reg_it = node.reg().unwrap();
     let dist = reg_it.next().unwrap();
     let redist = reg_it.next().unwrap();
@@ -860,4 +861,27 @@ pub fn get_gic_regs_from_dtb(dtb: &'static str) -> (u64, u64, u64, u64, u64, u64
         its.starting_address as u64,
         its.size.unwrap() as u64,
     )
+}
+
+pub fn find_mmio_address_size_tuples(dtb: &'static str) -> Vec<(u64, u32)> {
+    let compat = "microsoft,craton-virtio-placeholder";
+    let mut dtb_file = File::open(dtb).unwrap();
+    let blob = fdt_file_to_vec(&mut dtb_file).unwrap();
+    let mut ret: Vec<(u64, u32)> = Vec::new();
+    let fdt_tree = fdt_parser::Fdt::new(&blob).unwrap();
+    let mut _address: u64;
+    let mut _irq: u32;
+    if let Some(root) = fdt_tree.find_node("/") {
+        let mmio_nodes: Vec<fdt_parser::node::FdtNode> = root
+            .children()
+            .filter(|c| c.compatible().is_some() && c.compatible().unwrap().first().eq(compat))
+            .collect();
+        for node in mmio_nodes.iter() {
+            let _address = node.reg().unwrap().next().unwrap().starting_address as u64;
+            let int_prop = node.property("interrupts").unwrap();
+            let _irq = u32::from_be_bytes(int_prop.value[4..8].try_into().unwrap());
+            ret.push((_address, _irq));
+        }
+    }
+    ret
 }
