@@ -839,6 +839,7 @@ fn print_node(node: fdt_parser::node::FdtNode<'_, '_>, n_spaces: usize) {
     }
 }
 
+#[cfg(feature = "craton")]
 pub fn get_gic_regs_from_dtb(dtb: &'static str) -> (u64, u64, u64, u64, u64, u64) {
     let mut dtb_file = File::open(dtb).unwrap();
     let blob = fdt_file_to_vec(&mut dtb_file).unwrap();
@@ -863,6 +864,7 @@ pub fn get_gic_regs_from_dtb(dtb: &'static str) -> (u64, u64, u64, u64, u64, u64
     )
 }
 
+#[cfg(feature = "craton")]
 pub fn find_mmio_address_size_tuples(dtb: &'static str) -> Vec<(u64, u32)> {
     let compat = "microsoft,craton-virtio-placeholder";
     let mut dtb_file = File::open(dtb).unwrap();
