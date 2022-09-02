@@ -518,7 +518,7 @@ pub struct Vm {
     #[cfg(target_arch = "x86_64")]
     load_payload_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
     #[cfg(feature = "craton")]
-    host_dtb: Option<File>,
+    host_dtb: &'static str,
 }
 
 impl Vm {
@@ -537,7 +537,7 @@ impl Vm {
         activate_evt: EventFd,
         restoring: bool,
         timestamp: Instant,
-        #[cfg(feature = "craton")] host_dtb: Option<File>,
+        #[cfg(feature = "craton")] host_dtb: &'static str,
     ) -> Result<Self> {
         let boot_id_list = config
             .lock()
@@ -773,7 +773,7 @@ impl Vm {
         console_resize_pipe: Option<File>,
     ) -> Result<Self> {
         #[cfg(feature = "craton")]
-        let host_dtb = File::open("/sys/firmware/fdt").map_err(Error::HostDtbFile)?;
+        let host_dtb = "/sys/firmware/fdt";
 
         let timestamp = Instant::now();
 
@@ -856,7 +856,7 @@ impl Vm {
             false,
             timestamp,
             #[cfg(feature = "craton")]
-            Some(host_dtb),
+            host_dtb,
         )?;
 
         // The device manager must create the devices from here as it is part
@@ -935,7 +935,7 @@ impl Vm {
             true,
             timestamp,
             #[cfg(feature = "craton")]
-            None,
+            "",
         )
     }
 
@@ -996,7 +996,7 @@ impl Vm {
             true,
             timestamp,
             #[cfg(feature = "craton")]
-            None,
+            "",
         )
     }
 
@@ -1353,7 +1353,7 @@ impl Vm {
         #[cfg(feature = "craton")]
         let vgic_config = {
             let (dist_addr, dist_size, redists_addr, redists_size, its_addr, its_size) =
-                arch::aarch64::fdt::get_gic_regs_from_dtb(self.host_dtb.as_mut().unwrap());
+                arch::aarch64::fdt::get_gic_regs_from_dtb(self.host_dtb);
             VgicConfig {
                 vcpu_count,
                 dist_addr,

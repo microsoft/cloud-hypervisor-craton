@@ -839,8 +839,9 @@ fn print_node(node: fdt_parser::node::FdtNode<'_, '_>, n_spaces: usize) {
     }
 }
 
-pub fn get_gic_regs_from_dtb(dtb: &mut File) -> (u64, u64, u64, u64, u64, u64) {
-    let blob = fdt_file_to_vec(dtb).unwrap();
+pub fn get_gic_regs_from_dtb(dtb: &'static str) -> (u64, u64, u64, u64, u64, u64) {
+    let mut dtb_file = File::open(dtb).unwrap();
+    let blob = fdt_file_to_vec(&mut dtb_file).unwrap();
     let fdt = fdt_parser::Fdt::new(&blob).unwrap();
     let node = fdt.find_compatible(&["arm,gic-v3"]).unwrap();
     let mut reg_it = node.reg().unwrap();
